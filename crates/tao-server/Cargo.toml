@@ -1,0 +1,13 @@
+[package]
+name = "tao-server"
+description = "Wire transports for the tao protocol: JSONL over stdio (proto) and TCP/WS (serve) (see docs/design/protocol.md §5)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tao-protocol.workspace = true
+anyhow.workspace = true

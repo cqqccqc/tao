@@ -1,0 +1,12 @@
+[package]
+name = "tao-exec"
+description = "Headless one-shot runner: `tao exec \"...\"`, output as text or JSONL (see docs/design/architecture.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true

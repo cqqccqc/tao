@@ -1,0 +1,14 @@
+[package]
+name = "tao-tui"
+description = "ratatui terminal frontend: inline viewport, streaming markdown, approval modals (see docs/design/tui.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tao-core.workspace = true
+tao-protocol.workspace = true
+anyhow.workspace = true

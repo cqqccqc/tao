@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/tao-protocol",
+    "crates/tao-core",
+    "crates/tao-cli",
+    "crates/tao-tui",
+    "crates/tao-exec",
+    "crates/tao-server",
+    "crates/tao-apply-patch",
+    "crates/tao-mcp",
+    "crates/tao-acp",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/chenqi44/tao"
+authors = ["chenqi44"]
+
+[workspace.dependencies]
+# 内部 crate
+tao-protocol = { path = "crates/tao-protocol" }
+tao-core = { path = "crates/tao-core" }
+tao-apply-patch = { path = "crates/tao-apply-patch" }
+tao-mcp = { path = "crates/tao-mcp" }
+
+# 外部(常用,集中管理版本)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+anyhow = "1"
+clap = { version = "4", features = ["derive", "cargo"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"   # 崩溃时尽量落盘日志;abort 留待发行版再评估

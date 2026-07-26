@@ -1,0 +1,12 @@
+[package]
+name = "tao-acp"
+description = "ACP (Agent Client Protocol) adapter: `tao acp`, embedded by Zed-class editors (see docs/design/acp.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true

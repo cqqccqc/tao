@@ -1,0 +1,24 @@
+[package]
+name = "tao-cli"
+description = "The `tao` binary: thin dispatcher over tui/exec/proto/serve/acp/mcp-serve/login/sessions subcommands."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "tao"
+path = "src/main.rs"
+
+[dependencies]
+tao-core.workspace = true
+tao-tui = { path = "../tao-tui" }
+tao-exec = { path = "../tao-exec" }
+tao-server = { path = "../tao-server" }
+tao-mcp = { path = "../tao-mcp" }
+tao-acp = { path = "../tao-acp" }
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true

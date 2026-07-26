@@ -58,7 +58,7 @@ async fn run_turn(sess: &mut Session, cancel: CancellationToken) -> Result<()> {
 ```
 
 - **缓存友好**:Anthropic 的 `cache_control` 断点放在静态前缀末尾与历史尾部;OpenAI 自动前缀缓存同理(保持前缀字节稳定)。工具定义顺序固定,避免 cache miss。
-- **工具子集化**:内置工具全量提供;MCP 工具若超过 `mcp_tool_budget`(默认 20 个)则按 config 白名单裁剪,并在 system 中说明可用 `ListMcpTools`。
+- **工具子集化**:内置工具全量提供;MCP 工具若超过 `mcp_tool_budget`(默认 20 个)则按 config 白名单裁剪,并在 system 中说明可用 `ToolSearch` 元工具发现被折叠的 MCP 工具。
 - **token 预算**:发送前用 tiktoken 估算(Anthropic 计为近似),超过 `auto_compact_at`(默认窗口 92%)触发自动压缩。
 
 ## 4. 上下文压缩(compaction)

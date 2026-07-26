@@ -13,6 +13,7 @@
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LogEvent {
     SessionMeta { id, parent: Option<SessionId>, cwd, git_head, config_fingerprint, created_at },
+    SessionTitle { title: String },      // 会话标题:small_model 首轮后自动生成,/rename 可改
     UserInput { content: Vec<Content>, turn_id },
     AssistantMessage { content: Vec<Content>, usage: TokenUsage, turn_id },
     ToolCall { call_id, tool, args },                  // 决策前记录意图
@@ -67,6 +68,6 @@ pub enum LogEvent {
 
 ## 6. 生命周期卫生
 
-- `~/.tao/sessions.lock`(文件锁)防止多进程同时写同一 session 文件;serve 模式由 server 独占持有。
+- **并发写保护**:每个会话一把文件锁 `~/.tao/projects/<slug>/sessions/<id>.lock`(`fs2` flock)。同一会话同一时间只允许一个 writer;`tao serve` 常驻时各 tao 实例可读写**不同**会话,已锁会话在别处以只读 resume 打开(可查看,提交 turn 返回明确错误)。
+- **rotate 续写链**:单文件超 `max_session_mb`(默认 50)时封存当前文件,新文件以 `parent` 指向它续写;resume 沿 parent 链回放整条链,对用户呈现为一个会话。
 - 保留策略:`sessions.keep_days`(默认 30)与 `keep_count` 惰性清理;`tao sessions gc` 手动。
-- 单文件超 `max_session_mb`(默认 50)时 rotate:当前文件封存,新文件以 `parent` 链接续写。

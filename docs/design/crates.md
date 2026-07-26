@@ -19,6 +19,11 @@
 | 用途 | 选型 | 备注 |
 |---|---|---|
 | MCP | `rmcp`(modelcontextprotocol/rust-sdk) | 官方维护;stdio + streamable HTTP;无替代品 |
+| ACP | `agent_client_protocol`(zed-industries 官方 Rust SDK) | 协议演进快,锁版本跟进,契约测试兜底 |
+| shell 词法 | `shell-words` | 逃逸分析:拆分 `bash -lc` 命令串为 argv |
+| 路径 glob | `globset` | 权限规则的文件模式匹配(`src/generated/**`) |
+| 文件锁 | `fs2`(flock) | 会话并发写保护(见 sessions.md §6) |
+| 打开编辑器 | `open` | `/editor` 外部编辑器、OAuth 浏览器跳转 |
 | diff | `similar` | 补丁展示与校验;codex 同款 |
 | 补丁 DSL | 自研(`tao-apply-patch`) | 语法/语义分离设计,见 tools.md §3 |
 | AST 寻址 | `tree-sitter`(按需语言 grammar) | 仅用于 patch L2 锚定与大纲,不做全量索引 |

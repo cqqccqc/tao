@@ -8,11 +8,15 @@
 /// 前端 → core
 pub struct Submission { pub id: String, pub op: Op }
 /// core → 前端
-pub struct Event { pub id: String, pub msg: EventMsg }
+pub struct Event {
+    pub id: String,              // 回显触发它的 Submission.id(流事件回显 UserTurn 的 id)
+    pub seq: u64,                // 会话内单调递增
+    pub turn: Option<String>,    // 所属 turn_id(与 turn 无关的事件为 None)
+    pub msg: EventMsg,
+}
 ```
 
-- `id`:client 生成的请求 id(turn 用 `turn_id`);Event 的 `id` 回显触发它的 Submission id,审批等子请求用 `call_id`。
-- 所有 Event 另带 `seq: u64`(会话内单调递增)与 `turn: Option<TurnId>`,供前端排序、重连补拉(`Op::ResumeEvents { after_seq }`,serve 模式用)。
+- `id`/`seq`/`turn` 三个关联字段分工:`id` 做请求-应答配对(查询类 Op 靠它匹配响应);`seq` 做排序与断点补拉(`Op::ResumeEvents { after_seq }`);`turn` 做事件归属。
 - 协议版本:`EventMsg::SessionConfigured { protocol_version: u32, .. }` 握手声明;wire 模式下首行必须是 `Op::Hello { protocol_version }`,不匹配则 core 关闭连接并给出可读错误。
 
 ## 2. Op(前端 → core)
@@ -35,12 +39,19 @@ pub enum Op {
     ResumeSession { session_id: SessionId, fork: bool },
     CheckpointRollback { checkpoint_id: CheckpointId },    // 回滚文件+对话
 
-    // 查询
+    // 模式与规则
+    SetPermissionMode { mode: PermissionMode },            // TUI shift+tab / /mode
+    AddPermissionRule { rule: PermissionRule, scope: RuleScope }, // 固化为项目/用户规则
+    SetModel { model: String },                            // /model 会话内切换
+
+    // 查询(响应均为对应 SessionQuery* 事件,id 回显配对)
     GetHistory { after_seq: u64, limit: u32 },
     ResumeEvents { after_seq: u64 },                       // serve 模式重连补拉
     ListMcpTools,
     ListModels,
 }
+
+pub enum RuleScope { Session, Project, User }              // Session=仅本会话;后两者写 config 文件
 
 pub enum UserInput { Text { text: String }, Image { path: PathBuf } }
 
@@ -92,8 +103,15 @@ pub enum EventMsg {
 
     // 后台/系统
     BackgroundEvent { message: String },         // 如 "3 files changed on disk"
+    PermissionModeChanged { mode: PermissionMode },        // 模式切换广播(多前端同步)
     Error { message: String, retryable: bool },
     StreamError { message: String },             // 单次流失败(可能自动重试)
+
+    // 查询响应(对应 List*/Get* Op,id 回显配对;是响应不是流)
+    SessionQueryHistory { events: Vec<Event>, done: bool },
+    SessionQuerySessions { sessions: Vec<SessionSummary> },   // 含 fork 树 parent、标题、更新时间
+    SessionQueryMcpTools { tools: Vec<McpToolInfo>, health: Vec<McpServerHealth> },
+    SessionQueryModels { models: Vec<ModelInfo> },
 }
 
 pub enum ApprovalKind { Exec, Patch, Tool, McpTool }
@@ -149,5 +167,12 @@ pub struct ApprovalDetail {
 ## 6. 错误与流控
 
 - 协议级错误一律以 `EventMsg::Error { retryable }` 表达,不破坏流;fatal 错误后 core 发 `TurnComplete { stop_reason: Error }`。
-- 流式 channel 有界(1024),溢出时 core **合并** delta(文本拼接 / 输出行合并),不阻塞模型流;可靠事件(审批/边界)走独立 channel 绝不合并丢弃。
+- 流式 channel 有界(1024),溢出时 core **合并** delta(文本拼接 / 输出行合并),不阻塞模型流;可靠事件(审批/边界/查询响应)走独立 channel 绝不合并丢弃。
 - `Interrupt` 是尽力而为:已经发出的 delta 不回收,前端收到 `TurnComplete { stop_reason: Interrupted }` 才认为结束。
+
+## 7. turn 排队与并发
+
+- turn 进行中到达的 `UserTurn` 默认**排队**(FIFO),`TurnStarted` 发出即出队开始;TUI 显示"queued"徽标。
+- `Op::Interrupt { abandon_queued: bool }`(默认 true):中断当前 turn 时是否丢弃排队项。
+- 排队不适用于审批:审批响应永远即时处理。
+- 事件 `seq` 与日志 `LogEvent.seq` 是两个序列:Event 序列覆盖查询/模式等瞬时消息,日志序列只覆盖持久化事件;投影事件两个序列都带,`LogEvent` 记录对应的 Event seq 便于对照。

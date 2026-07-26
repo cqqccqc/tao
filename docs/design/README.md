@@ -5,7 +5,7 @@
 
 ## 愿景与定位
 
-- **通用内核,多前端**:`tao-core` 不假设任何 UI 形态,所有核心行为(会话、模型、工具、权限、持久化、扩展)都通过同一份 `Op`/`Event` 协议暴露。TUI 是 in-process 消费者;web/gui 是 wire 消费者。协议从第一天起就是 wire-stable 的。
+- **通用内核,多前端**:`tao-core` 不假设任何 UI 形态,所有核心行为(会话、模型、工具、权限、持久化、扩展)都通过同一份 `Op`/`Event` 协议暴露。TUI 是 in-process 消费者;web/gui 是 wire 消费者;ACP 适配层(见 [acp.md](acp.md))让 Zed 等编辑器内嵌 tao。协议从第一天起就是 wire-stable 的。
 - **经典体验做到位**:会话、工具、审批、plan 模式、MCP、自定义指令——与 Claude Code / codex 同等水准是入场券。
 - **可编程平台**:hooks、markdown 子 agent、slash 命令、MCP、技能(skills)优先于任何二进制插件系统。
 - **会话即资产**:append-only 事件日志是 source of truth,resume / fork / share / checkpoint 全部建立在它之上。
@@ -41,6 +41,7 @@
 | [sessions.md](sessions.md) | 事件日志格式、resume/fork、checkpoint(影子 git)、compaction、share |
 | [config.md](config.md) | 分层配置、config.toml 参考、模型提供方、认证(OAuth/API key)、TAO.md 指令文件 |
 | [extensibility.md](extensibility.md) | hooks、子 agent、slash 命令、MCP、技能 |
+| [acp.md](acp.md) | ACP(Agent Client Protocol)适配层:被 Zed 等编辑器内嵌集成 |
 | [tui.md](tui.md) | tao-tui 架构、inline viewport、渲染管线、组件、键位、主题 |
 | [testing.md](testing.md) | 测试金字塔、MockModel、fixture 回放、TUI 快照测试、fuzz |
 | [roadmap.md](roadmap.md) | M0–M6 里程碑、依赖关系、风险、非目标 |

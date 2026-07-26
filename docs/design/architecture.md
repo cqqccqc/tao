@@ -15,7 +15,8 @@ tao/
 │   ├── tao-exec/              # headless 单次执行:`tao exec "..."`(输出可 JSONL)
 │   ├── tao-server/            # JSONL-over-stdio(proto)与 socket serve(web/gui 用)
 │   ├── tao-apply-patch/       # patch DSL 解析与执行(文本 fuzz + AST 两级)
-│   └── tao-mcp/               # MCP 客户端管理(rmcp 封装)+ tao 自身作为 MCP server
+│   ├── tao-mcp/               # MCP 客户端管理(rmcp 封装)+ tao 自身作为 MCP server
+│   ├── tao-acp/               # ACP 适配层:`tao acp`,被 Zed 等编辑器拉起(见 acp.md)
 ├── docs/design/               # 本文档集
 └── xtask/                     # 开发任务脚本(快照更新、fixture 生成)
 ```
@@ -23,17 +24,32 @@ tao/
 crate 依赖方向(只允许向下依赖):
 
 ```
-tao-cli ──► tao-tui ──┐
-   │                  ▼
-   ├────► tao-exec ──► tao-core ──► tao-protocol
-   ├────► tao-server ──┘     │
-   └────► tao-mcp ◄──────────┘     ▲
-          tao-apply-patch ◄────────┘
+                    ┌─► tao-tui
+                    ├─► tao-exec
+                    ├─► tao-server
+ tao-cli ───────────┼─► tao-mcp ──► tao-core ──► tao-protocol
+ (子命令调度,薄壳)  ├─► tao-acp  ──┘      │
+                    └─► tao-login 内嵌    ▼
+                                    tao-apply-patch
 ```
 
 - `tao-protocol` 不依赖 `tao-core`(纯 serde 类型),前端可以只依赖 protocol。
 - `tao-core` 依赖 `tao-apply-patch`、`tao-mcp` 的实现;`tao-tui` 只通过 protocol + `AgentHandle` 与 core 交互。
+- `tao-mcp` / `tao-acp` 都是 core 的**消费者**(客户端适配层):mcp-serve 借 core 的会话能力对外提供工具,acp 把 core 事件翻译成 ACP。
 - 未来 `tao-web-ui` 复用 `tao-server` 的传输层;`tao-gui` 可同进程内嵌或走 server。
+
+### CLI 子命令(tao-cli 调度)
+
+| 命令 | 目标 crate |
+|---|---|
+| `tao` / `tao tui` | tao-tui |
+| `tao exec "<prompt>"` | tao-exec |
+| `tao proto` | tao-server(stdio 模式) |
+| `tao serve --port N` | tao-server(socket 模式,M4) |
+| `tao acp` | tao-acp |
+| `tao mcp-serve` | tao-mcp(server 模式) |
+| `tao login|logout|auth` | tao-cli(内嵌,调 tao-core auth) |
+| `tao sessions <ls|audit|gc>` | tao-cli(内嵌,读日志/索引) |
 
 ## 2. 进程模型
 

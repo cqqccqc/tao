@@ -103,7 +103,11 @@ pub struct ExecParams {
 - 生命周期:会话首次用到时惰性启动;config 变更/掉线自动重连(指数退避,上限 3 次);会话结束统一 kill。
 - 工具映射:`mcp__server__tool`;schema 直接透传;结果 content 映射为规范 `Content`(text/image)。
 - 调用同样有流式事件(`ToolCallBegin/End`),长调用显示进度。
-- 预算:单 server 工具 > 50 个时默认折叠(需 config 显式启用白名单),防止工具定义吃掉上下文。
+- 预算:暴露给模型的 MCP 工具默认上限 **20 个**(全局 `mcp_tool_budget`),单 server 超 20 即折叠;config 白名单显式启用。超额时系统提示告知模型可通过 `ToolSearch` 工具按关键词发现被折叠的工具(见下),避免"工具存在但模型不知道"。
+
+### ToolSearch(元工具)
+
+`ToolSearch { query }`:在全部已连接 MCP server 的工具目录中按名称/描述模糊匹配,返回候选工具的完整 spec。模型可随后以普通 `mcp__server__tool` 调用之。这替代了 agent-loop.md 早期草稿中"让模型用 ListMcpTools"的说法(`ListMcpTools` 是**前端**查询 Op,不暴露给模型;模型的发现入口只有 ToolSearch)。
 - 反向能力(M4):`tao mcp-serve` 把 tao 自身暴露为 MCP server(工具:list_sessions/send_message/read_session),让其他 agent/脚本驱动 tao。
 
 ## 6. 工具输出的安全与卫生

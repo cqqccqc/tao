@@ -104,7 +104,7 @@ pub enum ModelStreamEvent {                   // 规范增量,UI 直接消费
 
 ## 5. 模型目录与选择
 
-- 内置 catalog(内置在二进制,可被 config 覆盖/扩展):`{id, provider, display, context_window, max_output, supports_thinking, supports_images, supports_cache}`。
+- 内置 catalog(内置在二进制,可被 config 覆盖/扩展):`{id, provider, display, context_window, max_output, supports_thinking, supports_images, supports_cache, pricing?: {input, cached_input, output} per 1M tokens}`(pricing 可空,`/cost` 用量成本估算的数据源)。
 - `model` 配置支持 `provider/model-id` 显式指定;未带前缀时按 catalog 默认 provider 解析。
 - `ListModels` Op 返回 catalog + 各 provider 在线探测结果(可选)。
 

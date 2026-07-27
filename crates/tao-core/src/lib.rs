@@ -6,9 +6,11 @@
 pub mod agent;
 pub mod model;
 pub mod providers;
+pub mod session;
 pub mod tools;
 
 pub use agent::{Agent, AgentHandle, SessionConfig};
 pub use model::{ModelError, ModelRequest, ModelStreamEvent};
 pub use providers::ModelClient;
+pub use session::{TurnConfig, TurnEvent, TurnResult, run_turn};
 pub use tools::{Tool, ToolCtx, ToolError, ToolOutput, ToolRegistry};

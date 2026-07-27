@@ -81,7 +81,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Tui) {
         Command::Tui => tao_tui::run().await,
-        Command::Exec { prompt, json } => tao_exec::run(&prompt, json).await,
+        Command::Exec { prompt, json } => {
+            let opts = tao_exec::ExecOpts {
+                prompt,
+                cwd: std::env::current_dir()?,
+                model: None,
+                json,
+            };
+            tao_exec::run(opts).await
+        }
         Command::Proto => tao_server::run_proto().await,
         Command::Serve { port } => tao_server::run_serve(port).await,
         Command::Acp => tao_acp::run().await,

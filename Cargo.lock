@@ -1336,6 +1336,11 @@ name = "tao-exec"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde_json",
+ "tao-core",
+ "tao-protocol",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

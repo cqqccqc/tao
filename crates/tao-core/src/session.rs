@@ -1,0 +1,292 @@
+//! Turn loop:agent 循环的核心。
+//! 见 docs/design/agent-loop.md。
+//!
+//! 一个 turn = 从用户输入到模型停止调用工具的完整交互。
+//! 内部可能包含多轮"模型流 → 工具调用 → 工具结果 → 模型流"。
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use futures::StreamExt;
+use serde_json::Value;
+use tao_protocol::content::StopReason;
+use tao_protocol::ids::CallId;
+use tokio_util::sync::CancellationToken;
+
+use crate::model::{ModelContent, ModelMessage, ModelRequest, ModelStreamEvent};
+use crate::providers::ModelClient;
+use crate::tools::{Tool, ToolCtx, ToolError, ToolOutput, ToolRegistry};
+
+/// turn loop 产出的流式事件(供 TUI / exec 消费)。
+#[derive(Debug, Clone)]
+pub enum TurnEvent {
+    /// 模型文本增量。
+    TextDelta(String),
+    /// 模型思考增量。
+    ThinkingDelta(String),
+    /// 工具调用开始(模型要求调用某工具)。
+    ToolCallBegin { call_id: CallId, tool: String },
+    /// 工具调用结束(参数已完整)。
+    ToolCallEnd { call_id: CallId },
+    /// 工具执行开始。
+    ToolExecBegin { call_id: CallId },
+    /// 工具执行结束(含输出摘要)。
+    ToolExecEnd {
+        call_id: CallId,
+        ok: bool,
+        summary: String,
+    },
+    /// 本轮模型流结束(可能还有下一轮工具调用)。
+    ModelMessageEnd { stop_reason: StopReason },
+    /// 整个 turn 结束。
+    TurnComplete { stop_reason: StopReason, steps: u32 },
+    /// 错误(turn 终止)。
+    Error(String),
+}
+
+/// turn 执行结果。
+#[derive(Debug)]
+pub struct TurnResult {
+    pub stop_reason: StopReason,
+    pub steps: u32,
+    /// 完整的对话历史(含本轮新增的 user/assistant/tool_result)。
+    pub messages: Vec<ModelMessage>,
+}
+
+/// turn loop 配置。
+#[derive(Debug, Clone)]
+pub struct TurnConfig {
+    /// 最大"模型流 → 工具"轮次,防失控。默认 100。
+    pub max_steps: u32,
+}
+
+impl Default for TurnConfig {
+    fn default() -> Self {
+        Self { max_steps: 100 }
+    }
+}
+
+/// 运行一个 turn。
+///
+/// `messages` 是已有历史(可空);本函数会向其追加 user 输入、assistant 消息、
+/// tool_result 等,循环直到模型不再调用工具。
+///
+/// `on_event` 是同步回调(消费 TurnEvent);TUI/exec 各自实现。
+#[allow(clippy::too_many_arguments)]
+pub async fn run_turn<F>(
+    client: &dyn ModelClient,
+    tools: &ToolRegistry,
+    request: &ModelRequest,
+    messages: &mut Vec<ModelMessage>,
+    config: &TurnConfig,
+    cwd: &Path,
+    cancel: &CancellationToken,
+    mut on_event: F,
+) -> Result<TurnResult, crate::model::ModelError>
+where
+    F: FnMut(TurnEvent) + Send,
+{
+    let mut steps: u32 = 0;
+
+    loop {
+        steps += 1;
+        if steps > config.max_steps {
+            on_event(TurnEvent::Error(format!(
+                "max_steps({}) 超限",
+                config.max_steps
+            )));
+            return Ok(TurnResult {
+                stop_reason: StopReason::MaxSteps,
+                steps: steps - 1,
+                messages: messages.clone(),
+            });
+        }
+
+        if cancel.is_cancelled() {
+            return Ok(TurnResult {
+                stop_reason: StopReason::Interrupted,
+                steps: steps - 1,
+                messages: messages.clone(),
+            });
+        }
+
+        // 构建本次请求(完整历史 + tools)。
+        let req = ModelRequest {
+            model: request.model.clone(),
+            system: request.system.clone(),
+            messages: messages.clone(),
+            tools: tools.specs(),
+            reasoning: request.reasoning,
+            max_output_tokens: request.max_output_tokens,
+            temperature: request.temperature,
+            metadata: request.metadata.clone(),
+        };
+
+        let mut stream = client.stream(&req, cancel).await?;
+
+        // 累积本轮模型消息。
+        let mut text_buf = String::new();
+        let mut thinking_buf = String::new();
+        let mut tool_inputs: HashMap<CallId, ToolInputAccum> = HashMap::new();
+        let mut tool_order: Vec<CallId> = Vec::new();
+        let mut stop_reason = StopReason::EndTurn;
+
+        while let Some(ev) = stream.next().await {
+            if cancel.is_cancelled() {
+                return Ok(TurnResult {
+                    stop_reason: StopReason::Interrupted,
+                    steps: steps - 1,
+                    messages: messages.clone(),
+                });
+            }
+            match ev? {
+                ModelStreamEvent::TextDelta(t) => {
+                    on_event(TurnEvent::TextDelta(t.clone()));
+                    text_buf.push_str(&t);
+                }
+                ModelStreamEvent::ThinkingDelta(t) => {
+                    on_event(TurnEvent::ThinkingDelta(t.clone()));
+                    thinking_buf.push_str(&t);
+                }
+                ModelStreamEvent::ToolUseBegin { call_id, name } => {
+                    on_event(TurnEvent::ToolCallBegin {
+                        call_id: call_id.clone(),
+                        tool: name.clone(),
+                    });
+                    tool_inputs
+                        .entry(call_id.clone())
+                        .or_insert_with(|| ToolInputAccum {
+                            name,
+                            json_fragments: Vec::new(),
+                        });
+                    tool_order.push(call_id);
+                }
+                ModelStreamEvent::ToolUseInputDelta {
+                    call_id,
+                    json_fragment,
+                } => {
+                    if let Some(acc) = tool_inputs.get_mut(&call_id) {
+                        acc.json_fragments.push(json_fragment);
+                    }
+                }
+                ModelStreamEvent::ToolUseEnd { call_id } => {
+                    on_event(TurnEvent::ToolCallEnd { call_id });
+                }
+                ModelStreamEvent::MessageEnd {
+                    stop_reason: sr, ..
+                } => {
+                    stop_reason = sr;
+                    break;
+                }
+            }
+        }
+
+        // 构建 assistant 消息并入历史。
+        let mut asst_content: Vec<ModelContent> = Vec::new();
+        if !thinking_buf.is_empty() {
+            asst_content.push(ModelContent::Thinking {
+                text: thinking_buf,
+                signature: None,
+            });
+        }
+        if !text_buf.is_empty() {
+            asst_content.push(ModelContent::Text(text_buf));
+        }
+        // 解析工具调用参数。
+        let mut tool_calls: Vec<(CallId, String, Value)> = Vec::new();
+        for call_id in &tool_order {
+            if let Some(acc) = tool_inputs.remove(call_id) {
+                let input_str: String = acc.json_fragments.concat();
+                let input: Value = if input_str.is_empty() {
+                    Value::Object(serde_json::Map::new())
+                } else {
+                    serde_json::from_str(&input_str).unwrap_or_else(|e| {
+                        Value::String(format!("[参数解析失败: {e}]\n原始: {input_str}"))
+                    })
+                };
+                asst_content.push(ModelContent::ToolUse {
+                    call_id: call_id.clone(),
+                    name: acc.name.clone(),
+                    input: input.clone(),
+                });
+                tool_calls.push((call_id.clone(), acc.name, input));
+            }
+        }
+        messages.push(ModelMessage::Assistant {
+            content: asst_content,
+        });
+
+        on_event(TurnEvent::ModelMessageEnd { stop_reason });
+
+        // 无工具调用 → turn 结束。
+        if tool_calls.is_empty() || stop_reason != StopReason::ToolUse {
+            return Ok(TurnResult {
+                stop_reason,
+                steps,
+                messages: messages.clone(),
+            });
+        }
+
+        // 执行工具,结果入历史。
+        for (call_id, tool_name, input) in &tool_calls {
+            on_event(TurnEvent::ToolExecBegin {
+                call_id: call_id.clone(),
+            });
+            let output = exec_tool(tools, tool_name, input, cwd, cancel).await;
+            let (ok, summary, content, is_error) = match output {
+                Ok(o) => {
+                    let ok = !o.is_error;
+                    let summary = summarize(&o.content);
+                    (ok, summary, o.content, o.is_error)
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    (false, msg.clone(), format!("[工具执行失败: {msg}]"), true)
+                }
+            };
+            on_event(TurnEvent::ToolExecEnd {
+                call_id: call_id.clone(),
+                ok,
+                summary,
+            });
+            messages.push(ModelMessage::ToolResult {
+                call_id: call_id.clone(),
+                content: vec![ModelContent::Text(content)],
+                is_error,
+            });
+        }
+        // 循环:带着工具结果再问模型。
+    }
+}
+
+struct ToolInputAccum {
+    name: String,
+    json_fragments: Vec<String>,
+}
+
+async fn exec_tool(
+    tools: &ToolRegistry,
+    name: &str,
+    input: &Value,
+    cwd: &Path,
+    cancel: &CancellationToken,
+) -> Result<ToolOutput, ToolError> {
+    let tool: Arc<dyn Tool> = match tools.get(name) {
+        Some(t) => t,
+        None => return Ok(ToolOutput::error(format!("未知工具: {name}"))),
+    };
+    let ctx = ToolCtx::with_cancel(cwd, cancel.clone());
+    tool.call(input, &ctx).await
+}
+
+fn summarize(s: &str) -> String {
+    let first_line = s.lines().next().unwrap_or("");
+    if first_line.len() > 80 {
+        format!("{}...", &first_line[..77])
+    } else if s.lines().count() > 1 {
+        format!("{first_line} ...")
+    } else {
+        first_line.to_owned()
+    }
+}

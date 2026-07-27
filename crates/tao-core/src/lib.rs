@@ -4,5 +4,9 @@
 //! M1 起依次落地:providers(模型 codec)→ tools → turn loop → 权限 → 日志。
 
 pub mod agent;
+pub mod model;
+pub mod providers;
 
 pub use agent::{Agent, AgentHandle, SessionConfig};
+pub use model::{ModelError, ModelRequest, ModelStreamEvent};
+pub use providers::ModelClient;

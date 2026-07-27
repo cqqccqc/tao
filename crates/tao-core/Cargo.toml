@@ -17,3 +17,14 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+reqwest.workspace = true
+eventsource-stream.workspace = true
+futures.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+async-stream = "0.3"
+
+[dev-dependencies]
+wiremock.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

@@ -4,6 +4,7 @@ pub mod anthropic;
 pub mod common;
 pub mod openai_chat;
 pub mod openai_responses;
+pub mod registry;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;

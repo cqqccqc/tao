@@ -9,4 +9,4 @@
 mod app;
 mod render;
 
-pub use app::run;
+pub use app::{run, run_with_load_opts};

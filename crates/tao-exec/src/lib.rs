@@ -6,11 +6,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tao_core::config::{Config, LoadOpts};
 use tao_core::model::{ModelContent, ModelMessage, ModelRequest, RequestMeta, SystemBlock};
 use tao_core::providers::ModelClient;
-use tao_core::providers::anthropic::AnthropicClient;
-use tao_core::providers::openai_chat::OpenAiChatClient;
-use tao_core::providers::openai_responses::OpenAiResponsesClient;
+use tao_core::providers::registry::resolve;
 use tao_core::session::{TurnConfig, TurnEvent, run_turn};
 use tao_core::tools::ToolRegistry;
 use tokio_util::sync::CancellationToken;
@@ -19,50 +18,16 @@ use tokio_util::sync::CancellationToken;
 pub struct ExecOpts {
     pub prompt: String,
     pub cwd: PathBuf,
-    /// 覆盖默认模型(从环境推断)。
+    /// 覆盖默认模型(从 config 推断)。
     pub model: Option<String>,
     pub json: bool,
-}
-
-/// 从环境变量推断 provider + model。
-/// 优先级:ANTHROPIC_API_KEY > OPENAI_API_KEY(配合 OPENAI_BASE_URL 判断 chat vs responses)。
-fn resolve_provider() -> anyhow::Result<(Arc<dyn ModelClient>, String)> {
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
-        && !key.is_empty()
-    {
-        let base = std::env::var("ANTHROPIC_BASE_URL")
-            .unwrap_or_else(|_| "https://api.anthropic.com".into());
-        let model = std::env::var("TAO_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".into());
-        let client = AnthropicClient::with_api_key(base, key);
-        return Ok((Arc::new(client), model));
-    }
-
-    if let Ok(key) = std::env::var("OPENAI_API_KEY")
-        && !key.is_empty()
-    {
-        let base =
-            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
-        let model = std::env::var("TAO_MODEL").unwrap_or_else(|_| "gpt-4o".into());
-        // OPENAI_BASE_URL 非默认 → 兼容生态(DeepSeek/Qwen/Kimi 等)走 chat。
-        // 默认 openai.com → 走 responses(OpenAI 首选)。
-        let is_default_openai = base.trim_end_matches('/').ends_with("api.openai.com");
-        let client: Arc<dyn ModelClient> = if is_default_openai {
-            Arc::new(OpenAiResponsesClient::new(base, key))
-        } else {
-            Arc::new(OpenAiChatClient::new(base, key))
-        };
-        return Ok((client, model));
-    }
-
-    anyhow::bail!(
-        "未配置 API key:请设置 ANTHROPIC_API_KEY 或 OPENAI_API_KEY 环境变量。\n\
-         详见 docs/design/config.md §3"
-    )
+    pub load_opts: LoadOpts,
 }
 
 pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
-    let (client, default_model) = resolve_provider()?;
-    let model = opts.model.unwrap_or(default_model);
+    let config = Config::load(&opts.load_opts)?;
+    let (client, model) = resolve(&config).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let model = opts.model.unwrap_or(model);
 
     let tools = ToolRegistry::builtin();
     let system = vec![SystemBlock {
@@ -80,19 +45,20 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
     let req = ModelRequest {
         model,
         system,
-        messages: vec![], // run_turn 用 messages 参数
+        messages: vec![],
         tools: vec![],
-        reasoning: None,
+        reasoning: config.reasoning_effort,
         max_output_tokens: 4096,
         temperature: None,
         metadata: RequestMeta::default(),
     };
 
     let mut messages = messages;
-    let config = TurnConfig::default();
+    let config_turn = TurnConfig {
+        max_steps: config.max_turn_steps,
+    };
     let cancel = CancellationToken::new();
 
-    // ctrl-c → cancel
     let cancel2 = cancel.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
@@ -107,7 +73,7 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
             &tools,
             &req,
             &mut messages,
-            &config,
+            &config_turn,
             &opts.cwd,
             &cancel,
         )
@@ -118,7 +84,7 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
             &tools,
             &req,
             &mut messages,
-            &config,
+            &config_turn,
             &opts.cwd,
             &cancel,
         )

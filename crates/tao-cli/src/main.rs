@@ -2,6 +2,7 @@
 //! (见 docs/design/architecture.md 的 CLI 子命令表)。
 
 use clap::{Parser, Subcommand};
+use tao_core::config::{CliOverride, LoadOpts};
 
 #[derive(Parser)]
 #[command(
@@ -11,6 +12,18 @@ use clap::{Parser, Subcommand};
     long_about = None
 )]
 struct Cli {
+    /// 覆盖配置项(key=value,可多次),如 -c model=openai/gpt-5.1
+    #[arg(short = 'c', long = "config", value_name = "KEY=VALUE", global = true)]
+    overrides: Vec<String>,
+
+    /// 使用配置档案(profiles.<name>)
+    #[arg(long, global = true)]
+    profile: Option<String>,
+
+    /// 指定模型(provider/model-id)
+    #[arg(long, global = true)]
+    model: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -76,17 +89,42 @@ enum SessionsAction {
     Gc,
 }
 
+fn parse_overrides(raw: &[String]) -> anyhow::Result<Vec<CliOverride>> {
+    raw.iter()
+        .map(|s| {
+            if let Some((k, v)) = s.split_once('=') {
+                Ok(CliOverride {
+                    key: k.to_owned(),
+                    value: v.to_owned(),
+                })
+            } else {
+                anyhow::bail!("配置覆盖格式错误: {s}(应为 key=value)")
+            }
+        })
+        .collect()
+}
+
+fn build_load_opts(cli: &Cli) -> anyhow::Result<LoadOpts> {
+    Ok(LoadOpts {
+        profile: cli.profile.clone(),
+        overrides: parse_overrides(&cli.overrides)?,
+        ..Default::default()
+    })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let load_opts = build_load_opts(&cli)?;
     match cli.command.unwrap_or(Command::Tui) {
-        Command::Tui => tao_tui::run().await,
+        Command::Tui => tao_tui::run_with_load_opts(load_opts).await,
         Command::Exec { prompt, json } => {
             let opts = tao_exec::ExecOpts {
                 prompt,
                 cwd: std::env::current_dir()?,
-                model: None,
+                model: cli.model.clone(),
                 json,
+                load_opts,
             };
             tao_exec::run(opts).await
         }

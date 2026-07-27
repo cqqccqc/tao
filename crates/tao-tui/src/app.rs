@@ -12,11 +12,10 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use tao_core::config::{Config, LoadOpts};
 use tao_core::model::{ModelContent, ModelMessage, ModelRequest, RequestMeta, SystemBlock};
 use tao_core::providers::ModelClient;
-use tao_core::providers::anthropic::AnthropicClient;
-use tao_core::providers::openai_chat::OpenAiChatClient;
-use tao_core::providers::openai_responses::OpenAiResponsesClient;
+use tao_core::providers::registry::resolve;
 use tao_core::session::{TurnConfig, TurnEvent, run_turn};
 use tao_core::tools::ToolRegistry;
 use tokio::sync::mpsc;
@@ -29,18 +28,25 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 pub struct TuiOpts {
     pub cwd: PathBuf,
     pub model: Option<String>,
+    pub load_opts: LoadOpts,
 }
 
 pub async fn run() -> anyhow::Result<()> {
+    run_with_load_opts(LoadOpts::default()).await
+}
+
+pub async fn run_with_load_opts(load_opts: LoadOpts) -> anyhow::Result<()> {
     let opts = TuiOpts {
         cwd: std::env::current_dir()?,
         model: None,
+        load_opts,
     };
     run_with_opts(opts).await
 }
 
 async fn run_with_opts(opts: TuiOpts) -> anyhow::Result<()> {
-    let (client, default_model) = resolve_provider()?;
+    let config = Config::load(&opts.load_opts)?;
+    let (client, default_model) = resolve(&config).map_err(|e| anyhow::anyhow!("{e}"))?;
     let model = opts.model.unwrap_or(default_model);
 
     enable_raw_mode()?;
@@ -53,35 +59,6 @@ async fn run_with_opts(opts: TuiOpts) -> anyhow::Result<()> {
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     result
-}
-
-fn resolve_provider() -> anyhow::Result<(Arc<dyn ModelClient>, String)> {
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
-        && !key.is_empty()
-    {
-        let base = std::env::var("ANTHROPIC_BASE_URL")
-            .unwrap_or_else(|_| "https://api.anthropic.com".into());
-        let model = std::env::var("TAO_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".into());
-        return Ok((Arc::new(AnthropicClient::with_api_key(base, key)), model));
-    }
-    if let Ok(key) = std::env::var("OPENAI_API_KEY")
-        && !key.is_empty()
-    {
-        let base =
-            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
-        let model = std::env::var("TAO_MODEL").unwrap_or_else(|_| "gpt-4o".into());
-        let is_default_openai = base.trim_end_matches('/').ends_with("api.openai.com");
-        let client: Arc<dyn ModelClient> = if is_default_openai {
-            Arc::new(OpenAiResponsesClient::new(base, key))
-        } else {
-            Arc::new(OpenAiChatClient::new(base, key))
-        };
-        return Ok((client, model));
-    }
-    anyhow::bail!(
-        "未配置 API key:请设置 ANTHROPIC_API_KEY 或 OPENAI_API_KEY 环境变量。\n\
-         详见 docs/design/config.md §3"
-    )
 }
 
 struct UiState {

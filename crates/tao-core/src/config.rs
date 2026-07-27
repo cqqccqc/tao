@@ -19,6 +19,17 @@ pub enum WireApi {
     OpenaiChat,
 }
 
+/// Anthropic provider 的认证方式。默认 ApiKey(Anthropic 原生)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnthropicAuth {
+    /// `x-api-key: <key>`(Anthropic 原生)。
+    #[default]
+    ApiKey,
+    /// `Authorization: Bearer <token>`(OAuth / 代理网关)。
+    Bearer,
+}
+
 /// 单个 provider 的配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelProviderConfig {
@@ -28,6 +39,9 @@ pub struct ModelProviderConfig {
     pub wire_api: WireApi,
     /// 读 API key 的环境变量名。
     pub env_key: String,
+    /// Anthropic provider 的认证方式(仅 wire_api=anthropic 时生效)。
+    #[serde(default)]
+    pub anthropic_auth: AnthropicAuth,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
 }
@@ -62,6 +76,7 @@ impl Default for Config {
                 base_url: "https://api.anthropic.com".into(),
                 wire_api: WireApi::Anthropic,
                 env_key: "ANTHROPIC_API_KEY".into(),
+                anthropic_auth: AnthropicAuth::ApiKey,
                 headers: HashMap::new(),
             },
         );
@@ -72,6 +87,7 @@ impl Default for Config {
                 base_url: "https://api.openai.com".into(),
                 wire_api: WireApi::OpenaiResponses,
                 env_key: "OPENAI_API_KEY".into(),
+                anthropic_auth: AnthropicAuth::default(),
                 headers: HashMap::new(),
             },
         );
@@ -356,6 +372,7 @@ impl Config {
                             base_url: String::new(),
                             wire_api: WireApi::OpenaiChat,
                             env_key: String::new(),
+                            anthropic_auth: AnthropicAuth::default(),
                             headers: HashMap::new(),
                         });
                     match field {
@@ -423,7 +440,10 @@ fn parse_wire_api(s: &str) -> anyhow::Result<WireApi> {
 }
 
 fn default_user_config() -> Option<PathBuf> {
-    directories::ProjectDirs::from("dev", "tao", "tao").map(|d| d.config_dir().join("config.toml"))
+    // 对齐 docs/design/config.md:~/.tao/config.toml(不走 XDG,与 codex/claude-code 风格一致)
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".tao").join("config.toml"))
 }
 
 fn default_project_config() -> Option<PathBuf> {
@@ -449,7 +469,10 @@ mod tests {
 
     #[test]
     fn model_prefix_resolves_provider() {
-        let c = Config { model: Some("anthropic/claude-sonnet-4-6".into()), ..Config::default() };
+        let c = Config {
+            model: Some("anthropic/claude-sonnet-4-6".into()),
+            ..Config::default()
+        };
         assert_eq!(c.current_provider_id().as_deref(), Some("anthropic"));
         assert_eq!(c.current_model_id().as_deref(), Some("claude-sonnet-4-6"));
     }
@@ -466,7 +489,10 @@ mod tests {
 
     #[test]
     fn partial_override_applies() {
-        let mut c = Config { model: Some("anthropic/x".into()), ..Config::default() };
+        let mut c = Config {
+            model: Some("anthropic/x".into()),
+            ..Config::default()
+        };
         let p = PartialConfig {
             model: Some("openai/gpt-4o".into()),
             permission_mode: Some(PermissionMode::Plan),

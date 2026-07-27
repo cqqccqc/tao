@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::config::{Config, ModelProviderConfig, WireApi};
+use crate::config::{AnthropicAuth, Config, ModelProviderConfig, WireApi};
 use crate::model::ModelError;
 use crate::providers::ModelClient;
 use crate::providers::anthropic::AnthropicClient;
@@ -43,7 +43,15 @@ pub fn resolve(config: &Config) -> Result<(Arc<dyn ModelClient>, String), ModelE
         .ok_or_else(|| ModelError::Build("未指定 model(例:anthropic/claude-sonnet-4-6)".into()))?;
 
     let client: Arc<dyn ModelClient> = match provider.wire_api {
-        WireApi::Anthropic => Arc::new(AnthropicClient::with_api_key(&provider.base_url, &api_key)),
+        WireApi::Anthropic => {
+            let client = match provider.anthropic_auth {
+                AnthropicAuth::ApiKey => {
+                    AnthropicClient::with_api_key(&provider.base_url, &api_key)
+                }
+                AnthropicAuth::Bearer => AnthropicClient::with_bearer(&provider.base_url, &api_key),
+            };
+            Arc::new(client)
+        }
         WireApi::OpenaiResponses => {
             Arc::new(OpenAiResponsesClient::new(&provider.base_url, &api_key))
         }

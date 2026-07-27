@@ -12,7 +12,8 @@ pub mod tools;
 
 pub use agent::{Agent, AgentHandle, SessionConfig};
 pub use config::{
-    CliOverride, Config, LoadOpts, ModelProviderConfig, PartialConfig, SessionsConfig, WireApi,
+    AnthropicAuth, CliOverride, Config, LoadOpts, ModelProviderConfig, PartialConfig,
+    SessionsConfig, WireApi,
 };
 pub use model::{ModelError, ModelRequest, ModelStreamEvent};
 pub use providers::ModelClient;

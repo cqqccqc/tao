@@ -1,6 +1,6 @@
 # M2 实现摘要(供 code review)
 
-> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`。`cargo ci` 全绿(fmt + clippy -D warnings + test)。
+> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`。`cargo ci` 全绿(fmt + clippy -D warnings + test)。
 > 设计文档:`docs/design/{permissions,tools,config,sessions}.md`。本文是**实现层**摘要,对照代码 review 用。
 
 ---
@@ -63,12 +63,33 @@
 
 ---
 
+## M2-4 会话持久化(recorder + replay + resume/fork)
+
+### `crates/tao-core/src/recorder.rs`
+- `Recorder` trait(`fn record(LogEvent)`)+ `NullRecorder`(测试)+ `JsonlRecorder`(JSONL append+flush,`seq` AtomicU64 续,`ts` SystemTime)。
+- `JsonlRecorder::create/open_existing/create_fork`(~/.tao/projects/<slug>/sessions/<id>.jsonl;fork 写 `SessionMeta{parent}`);`session_dir`/`session_file_path` 供 CLI 扫描。
+
+### `crates/tao-core/src/replay.rs`
+- `SessionState { id, parent, cwd, title, messages, session_grants, mode }`;`replay(path)` fold LogEvent → SessionState。
+- `UserInput`/`AssistantMessage` → ModelMessage;`ToolResult`(output 约定 `{content,is_error}`)→ ToolResult msg;`PermissionGrant` → grants;`ModeChange` → mode。Compaction 识别未应用(M2-5)。
+
+### 接入
+- `session.rs::run_turn` 加 `recorder: &dyn Recorder`;记 `AssistantMessage`/`ToolCall`/`ToolResult`/`Approval`/`PermissionGrant`/`TurnBoundary`(各 return 点前记 boundary)。
+- exec `--resume <id>`/`--fork`:replay → messages + engine(mode+grants);记 `UserInput`;输出 session id。tui 落盘(新会话;tui resume 留 TODO)。
+- CLI `--resume`/`--fork`(全局,exec);`sessions ls`(扫描 jsonl)/`audit <id>`(权限轨迹)/`gc`(keep_days 删旧)。
+
+### 测试
+- recorder 4 单测(slugify/create+record/open 续 seq/read_max_seq);replay 2 单测(状态重建/tool result 配对);turn_loop 传 NullRecorder 回归。
+
+---
+
 ## v1 简化 / TODO(留后续)
 
 | 项 | v1 现状 | TODO |
 |---|---|---|
 | 逃逸分析 | 减少打扰,非安全边界 | M5 OS 沙箱(seatbelt/landlock) |
-| 会话授权 | 仅内存(`session_grants`) | resume 重放 `PermissionGrant`(依赖会话持久化) |
+| 会话授权 | resume 重放 `PermissionGrant`(M2-4 已实现) | — |
+| 会话持久化 | recorder+replay+resume/fork+sessions | index.redb、shadow-git checkpoint(M4)、rotate 续写、fs2 并发锁、config_fingerprint、tui resume |
 | Edit 先 Read | 不强制(靠唯一性+diff) | `ToolCtx` 加 `read_files` 跟踪 |
 | Patch 寻址 | L1 文本 fuzz only | L2 tree-sitter AST 锚定 |
 | Grep fallback | 无 .gitignore(跳过常见目录) | rg 优先时无此问题;fallback 可加 ignore crate |
@@ -91,4 +112,11 @@ cargo run -p tao-cli --bin tao -- exec --on-ask approve "用 Grep 找 fn main"
 
 # TUI:shift+tab 切模式;工具触发审批弹窗 y/s/n/a
 cargo run -p tao-cli --bin tao --
+
+# 会话持久化:exec 落盘 → resume/fork → sessions 管理
+cargo run -p tao-cli --bin tao -- exec "列出当前目录文件"   # 输出 session id
+cargo run -p tao-cli --bin tao -- sessions ls
+cargo run -p tao-cli --bin tao -- --resume <id> exec "接着刚才的"
+cargo run -p tao-cli --bin tao -- --resume <id> --fork exec "分叉探索"
+cargo run -p tao-cli --bin tao -- sessions audit <id>
 ```

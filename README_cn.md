@@ -8,7 +8,7 @@ A Rust coding agent built around a universal harness core and one wire-stable pr
 
 [English](README.md) | [简体中文](README_cn.md)
 
-[![CI](https://github.com/chenqi44/tao/actions/workflows/ci.yml/badge.svg)](https://github.com/chenqi44/tao/actions/workflows/ci.yml)
+[![CI](https://github.com/cqqccqc/tao/actions/workflows/ci.yml/badge.svg)](https://github.com/cqqccqc/tao/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable%20·%20edition%202024-orange.svg)](https://www.rust-lang.org/)
 [![Stage](https://img.shields.io/badge/stage-alpha%20·%20dogfood-yellow.svg)](#路线图)
@@ -70,7 +70,7 @@ tao 是一个用 Rust 构建的 coding agent。它的核心不是某个终端 UI
 **前置**：[Rust stable](https://www.rust-lang.org/tools/install)（toolchain 固定见 `rust-toolchain.toml`）。
 
 ```bash
-git clone https://github.com/chenqi44/tao.git
+git clone https://github.com/cqqccqc/tao.git
 cd tao
 cargo build --release        # 产物：target/release/tao
 # 可选：装到 PATH

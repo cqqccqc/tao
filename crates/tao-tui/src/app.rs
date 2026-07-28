@@ -504,7 +504,7 @@ fn handle_turn_event(ev: TurnEvent, state: &mut UiState) {
     }
 }
 
-/// 列会话目录(TUI `/sessions` 用)。
+/// 列会话目录(TUI `/sessions` 用,含 title)。
 fn list_sessions(dir: &std::path::Path) -> String {
     if !dir.exists() {
         return "(无会话)".into();
@@ -521,14 +521,37 @@ fn list_sessions(dir: &std::path::Path) -> String {
     }
     let mut s = String::new();
     for e in entries {
-        let id = e
-            .path()
+        let path = e.path();
+        let id = path
             .file_stem()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        let id_short = &id[..8.min(id.len())];
         let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-        s.push_str(&format!("{id}  {size}B\n"));
+        // replay 提取 title
+        let title = tao_core::replay::replay(&path)
+            .ok()
+            .and_then(|st| {
+                st.title.or_else(|| {
+                    st.messages.iter().find_map(|m| match m {
+                        tao_core::model::ModelMessage::User { content } => {
+                            content.iter().find_map(|c| match c {
+                                tao_core::model::ModelContent::Text(t) => Some(t.clone()),
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    })
+                })
+            })
+            .unwrap_or_else(|| "(无标题)".into());
+        let title_trunc = if title.len() > 30 {
+            &title[..30]
+        } else {
+            &title
+        };
+        s.push_str(&format!("{title_trunc}  [{id_short}]  {size}B\n"));
     }
     s
 }

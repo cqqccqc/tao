@@ -96,8 +96,10 @@ enum AuthAction {
 
 #[derive(Subcommand)]
 enum SessionsAction {
-    /// 列出会话(fork 树)。
+    /// 列出会话(fork 树 + title)。
     Ls,
+    /// 预览会话内容(meta + 消息摘要)。
+    Show { session_id: String },
     /// 输出会话的权限审计轨迹。
     Audit { session_id: String },
     /// 按保留策略清理旧会话。
@@ -173,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
             let cwd = std::env::current_dir()?;
             match action {
                 SessionsAction::Ls => run_sessions_ls(&cwd),
+                SessionsAction::Show { session_id } => run_sessions_show(&cwd, &session_id),
                 SessionsAction::Audit { session_id } => run_sessions_audit(&cwd, &session_id),
                 SessionsAction::Gc => {
                     let config = tao_core::config::Config::load(&load_opts)?;
@@ -192,41 +195,179 @@ fn run_sessions_ls(cwd: &std::path::Path) -> anyhow::Result<()> {
         println!("(无会话)");
         return Ok(());
     }
-    let mut entries: Vec<_> = std::fs::read_dir(&dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
-        .collect();
-    entries.sort_by_key(|e| {
-        std::cmp::Reverse(
-            e.metadata()
-                .ok()
+
+    // 加载所有会话(id → SessionState + size + mtime)
+    let mut sessions: Vec<(tao_core::replay::SessionState, u64, u64)> = Vec::new();
+    for e in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
+        let path = e.path();
+        if path.extension().is_some_and(|x| x == "jsonl") {
+            let meta = e.metadata().ok();
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let mtime = meta
+                .as_ref()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs()),
-        )
-    });
-    if entries.is_empty() {
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Ok(state) = tao_core::replay::replay(&path) {
+                sessions.push((state, size, mtime));
+            }
+        }
+    }
+
+    if sessions.is_empty() {
         println!("(无会话)");
         return Ok(());
     }
-    println!("{:<36} {:>10}  MODIFIED(s)", "SESSION_ID", "SIZE");
-    for e in entries {
-        let path = e.path();
-        let id = path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let meta = e.metadata().ok();
-        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-        let mtime = meta
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        println!("{id:<36} {size:>10}  {mtime}");
+
+    // 按 mtime 倒序
+    sessions.sort_by_key(|b| std::cmp::Reverse(b.2));
+
+    // 构建父子映射(id → children)
+    use std::collections::HashMap;
+    let mut children: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut roots: Vec<usize> = Vec::new();
+    for (i, (s, _, _)) in sessions.iter().enumerate() {
+        if let Some(p) = &s.parent {
+            let pid = p.as_ref().to_string();
+            children.entry(pid).or_default().push(i);
+        } else {
+            roots.push(i);
+        }
     }
+
+    // 递归打印树
+    fn print_tree(
+        sessions: &[(tao_core::replay::SessionState, u64, u64)],
+        children: &HashMap<String, Vec<usize>>,
+        idx: usize,
+        depth: usize,
+    ) {
+        let (s, size, _mtime) = &sessions[idx];
+        let indent = "  ".repeat(depth);
+        let title = s.title.as_deref().unwrap_or_else(|| {
+            s.messages
+                .iter()
+                .find_map(|m| match m {
+                    tao_core::model::ModelMessage::User { content } => {
+                        content.iter().find_map(|c| match c {
+                            tao_core::model::ModelContent::Text(t) => Some(t.as_str()),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                })
+                .unwrap_or("(无标题)")
+        });
+        let title_trunc: String = title.chars().take(40).collect();
+        let id_short = &s.id.as_ref().to_string()[..8];
+        println!(
+            "{indent}{title_trunc}  [{id_short}]  {}msg  {size}B",
+            s.messages.len()
+        );
+
+        if let Some(kids) = children.get(s.id.as_ref().to_string().as_str()) {
+            for &k in kids {
+                print_tree(sessions, children, k, depth + 1);
+            }
+        }
+    }
+
+    for &r in &roots {
+        print_tree(&sessions, &children, r, 0);
+    }
+    // 无 parent 但 parent 不在列表中的(孤儿)
+    for (i, (s, _, _)) in sessions.iter().enumerate() {
+        if let Some(p) = &s.parent {
+            let pid = p.as_ref().to_string();
+            if !sessions.iter().any(|(ss, _, _)| ss.id.as_ref() == pid) {
+                print_tree(&sessions, &children, i, 0);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_sessions_show(cwd: &std::path::Path, id: &str) -> anyhow::Result<()> {
+    let sid = tao_protocol::ids::SessionId::new(id.to_string());
+    let path = tao_core::recorder::session_file_path(cwd, &sid)
+        .ok_or_else(|| anyhow::anyhow!("HOME 未设置,无法定位会话日志"))?;
+    let state =
+        tao_core::replay::replay(&path).map_err(|e| anyhow::anyhow!("读取会话失败: {e}"))?;
+
+    println!("═══ 会话 {} ═══", state.id.as_ref());
+    println!(
+        "parent: {}",
+        state
+            .parent
+            .as_ref()
+            .map(|p| p.as_ref().to_string())
+            .unwrap_or_else(|| "(根)".into())
+    );
+    println!("cwd:    {}", state.cwd.display());
+    println!("title:  {}", state.title.as_deref().unwrap_or("(无)"));
+    println!("messages: {}", state.messages.len());
+    println!();
+
+    for (i, msg) in state.messages.iter().enumerate() {
+        let (role, text) = match msg {
+            tao_core::model::ModelMessage::User { content } => (
+                "用户",
+                content
+                    .iter()
+                    .filter_map(|c| {
+                        if let tao_core::model::ModelContent::Text(t) = c {
+                            Some(t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            tao_core::model::ModelMessage::Assistant { content } => (
+                "助手",
+                content
+                    .iter()
+                    .filter_map(|c| {
+                        if let tao_core::model::ModelContent::Text(t) = c {
+                            Some(t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            tao_core::model::ModelMessage::ToolResult {
+                content, is_error, ..
+            } => {
+                let t = content
+                    .iter()
+                    .filter_map(|c| {
+                        if let tao_core::model::ModelContent::Text(t) = c {
+                            Some(t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (
+                    "工具",
+                    format!("[{}] {}", if *is_error { "✗" } else { "✓" }, t),
+                )
+            }
+        };
+        let trunc = if text.len() > 100 {
+            &text[..100]
+        } else {
+            &text
+        };
+        println!("[{i}] {role}: {trunc}");
+    }
+
     Ok(())
 }
 

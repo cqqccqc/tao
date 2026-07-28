@@ -95,17 +95,17 @@ tao auth status                # 每个 provider 的凭证来源与有效期
 - `auth.json` 结构按 provider 分节;权限 0600;被外部修改时按 mtime 热加载。
 - headless/CI:只认 `env_key`,不做任何交互。
 
-## 4. TAO.md(指令文件)
+## 4. AGENTS.md(指令文件)
 
 层级发现,全部并入 system 的"指令区"(缓存前缀内,位置固定):
 
 ```
-~/.tao/TAO.md                 # 个人全局偏好
-<repo 根>/TAO.md              # 项目约定(等价 CLAUDE.md/AGENTS.md 的角色)
-<repo>/子目录/TAO.md          # 目录级,访问该目录文件时生效(惰性追加)
+~/.tao/AGENTS.md              # 个人全局偏好
+<repo 根>/AGENTS.md           # 项目约定(社区通用名;兼容 CLAUDE.md/TAO.md)
+<repo>/子目录/AGENTS.md       # 目录级,访问该目录文件时生效(惰性追加)
 ```
 
-- 兼容:repo 根若只有 `AGENTS.md`/`CLAUDE.md` 而无 `TAO.md`,读取并在 UI 提示一次(降低迁移成本)。
+- 兼容:repo 根若只有 `CLAUDE.md`/`TAO.md` 而无 `AGENTS.md`,读取并在 UI 提示一次(降低迁移成本)。`AGENTS.md` 优先。
 - `@path/to/file` 引用语法:展开为文件内容(带路径标注),递归深度限 3。
 - 合并顺序:全局 → 根 → 目录;冲突时更具体的靠后(后写优先,模型天然更重视靠后指令)。
 - `SessionMeta.config_fingerprint` 记录指令文件 hash 集,resume 时指令变了会提示。

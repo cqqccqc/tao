@@ -101,7 +101,7 @@ impl AgentHandle {
 | `compact.rs` | 上下文压缩策略 |
 | `config.rs` | 分层配置加载(figment) |
 | `auth.rs` | 凭证存储(keyring + auth.json)、OAuth PKCE |
-| `instructions.rs` | TAO.md 层级发现与合并 |
+| `instructions.rs` | AGENTS.md 层级发现与合并 |
 
 核心 trait(抽象清单刻意保持最小):
 

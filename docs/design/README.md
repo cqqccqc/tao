@@ -39,7 +39,7 @@
 | [tools.md](tools.md) | Tool trait、内置工具、Edit/patch 引擎、MCP 客户端 |
 | [permissions.md](permissions.md) | 权限模式、规则引擎、审批流程、逃逸分析、未来 OS 沙箱 |
 | [sessions.md](sessions.md) | 事件日志格式、resume/fork、checkpoint(影子 git)、compaction、share |
-| [config.md](config.md) | 分层配置、config.toml 参考、模型提供方、认证(OAuth/API key)、TAO.md 指令文件 |
+| [config.md](config.md) | 分层配置、config.toml 参考、模型提供方、认证(OAuth/API key)、AGENTS.md 指令文件 |
 | [extensibility.md](extensibility.md) | hooks、子 agent、slash 命令、MCP、技能 |
 | [acp.md](acp.md) | ACP(Agent Client Protocol)适配层:被 Zed 等编辑器内嵌集成 |
 | [tui.md](tui.md) | tao-tui 架构、inline viewport、渲染管线、组件、键位、主题 |

@@ -1,6 +1,6 @@
 # tao 交接文档
 
-> 用于在另一台机器上继续开发。最后更新:2026-07-28,M2-2 Edit/Patch/Grep/Glob 工具闭环完成。
+> 用于在另一台机器上继续开发。最后更新:2026-07-28,M2-3 AGENTS.md 指令文件完成。
 
 ## 项目状态速览
 
@@ -15,7 +15,8 @@ tao 是一个用 Rust 构建的 coding agent,对标 Claude Code / codex CLI / ge
 | M2 配置体系 | ✅ 完成(提前) | 分层 config.toml + provider 注册表 + -c/--profile/--model CLI |
 | M2-1 权限引擎 | ✅ 完成 | 三层判定(模式×规则×会话决策)+ 逃逸分析 + Approver trait + TUI 审批弹窗 + exec on_ask + bypass flag |
 | M2-2 工具闭环 | ✅ 完成 | Edit(字符串替换)+ Patch(apply-patch DSL,事务性)+ Grep(rg+fallback)+ Glob |
-| M2 其余 | ⬜ 未开始 | 会话持久化、TAO.md、compaction、markdown 渲染 |
+| M2-3 指令文件 | ✅ 完成 | AGENTS.md 层级发现(全局+项目,兼容 CLAUDE.md/TAO.md)+ 注入 system prompt |
+| M2 其余 | ⬜ 未开始 | 会话持久化、compaction、markdown 渲染 |
 | M3–M6 | ⬜ 未开始 | MCP/hooks/子agent、ACP、shadow-git checkpoint、OS 沙箱、web-ui |
 
 **测试:`cargo ci` 全绿(fmt + clippy -D warnings + test)。含权限引擎单测 + turn_loop 审批矩阵 + apply-patch 12 单测(解析/寻址/事务性)+ Edit/Grep/Glob 单测。**
@@ -107,6 +108,7 @@ tao/
 │   │   ├── src/
 │   │   │   ├── config.rs       # 分层配置 + provider 定义 + [permissions] rules(M2)
 │   │   │   ├── model.rs        # 规范模型格式(ModelRequest/ModelStreamEvent/ModelError)
+│   │   │   ├── instructions.rs # AGENTS.md 层级发现 + 合并,注入 system(M2-3)
 │   │   │   ├── permissions.rs  # 权限引擎:三层判定 + 逃逸分析 + Approver trait(M2-1)
 │   │   │   ├── session.rs      # turn loop 主循环(run_turn)
 │   │   │   ├── providers/      # ModelClient trait + 三个 codec + 公共 HTTP/SSE 层 + registry
@@ -139,6 +141,7 @@ tao/
 5. **Anthropic 双 auth**:`anthropic_auth = "api-key"`(原生,`x-api-key`头)或 `"bearer"`(代理网关,`Authorization: Bearer`)。
 6. **权限三层 + Approver trait**:`PermissionEngine.decide` = `first_match(会话决策, 规则引擎, 模式默认值)`;`Ask` 时 `run_turn` 经 `Approver` trait await 前端(TUI 弹窗 / exec 按 `--on-ask`)。逃逸分析 v1 只减少打扰(非安全边界,M5 OS 沙箱兜底);不可解析⇒升级 Ask。`Tool::permission_key` 声明权限维度(Bash argv / Path / Domain)。
 7. **Edit/Patch + apply-patch**:Edit 靠 `old_string` 唯一性(不强制先 Read,v1);Patch 用 apply-patch DSL,语法/语义分离(parse→L1 文本 fuzz 寻址→事务性写盘,失败即拒不猜测),L2 AST 锚定留后续。Grep 优先 `rg` 子进程,fallback `regex` 遍历;Glob 用 `glob` crate。
+8. **AGENTS.md 指令文件**:`instructions::load` 发现 `~/.tao/AGENTS.md` + `<cwd>/AGENTS.md`(兼容 CLAUDE.md/TAO.md),合并(全局→项目)注入 system 前缀。v1 不向上找 repo 根、不子目录惰性、不 @path 展开、不 fingerprint(TODO)。
 
 ## 已知问题与局限
 
@@ -164,8 +167,8 @@ tao/
 
 1. ✅ **权限引擎 + 审批弹窗**(M2-1 已完成):`permissions.rs` + `Tool::permission_key` + `Approver` trait + TUI 弹窗 + exec `--on-ask` + `--dangerously-bypass-permissions`。
 2. ✅ **Edit/Patch + Grep/Glob**(M2-2 已完成):`tools/edit.rs`+`patch.rs`+`grep.rs`+`glob.rs` + `tao-apply-patch` 引擎(parse + L1 文本 fuzz 寻址 + 事务性写盘)。
-3. **会话持久化**——`recorder.rs` + `replay.rs`:JSONL 事件日志 + resume/fork。
-4. **TAO.md 指令文件**——`instructions.rs`:层级发现,注入 system prompt。
+3. ✅ **AGENTS.md 指令文件**(M2-3 已完成):`instructions.rs` 层级发现(全局+项目,兼容 CLAUDE.md/TAO.md)+ 注入 system prompt。
+4. **会话持久化**——`recorder.rs` + `replay.rs`:JSONL 事件日志 + resume/fork。
 5. **compaction**——上下文压缩(摘要)。
 6. **markdown 流式渲染**——TUI 升级。
 

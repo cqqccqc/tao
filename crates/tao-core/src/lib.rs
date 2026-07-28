@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod instructions;
 pub mod model;
 pub mod permissions;
 pub mod providers;

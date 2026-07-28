@@ -155,13 +155,20 @@ async fn app_loop(
     });
 
     let tools = Arc::new(ToolRegistry::builtin());
-    let system = vec![SystemBlock {
+    let mut system: Vec<SystemBlock> = Vec::new();
+    if let Some(instr) = tao_core::instructions::load(cwd) {
+        system.push(SystemBlock {
+            text: instr,
+            cache_breakpoint: None,
+        });
+    }
+    system.push(SystemBlock {
         text: "你是 tao,一个 Rust 编写的 coding agent。\
-               你可以通过 Bash / Read / Write 工具帮助用户完成任务。\
+               你可以通过 Bash / Read / Write / Edit / Patch / Grep / Glob 工具帮助用户完成任务。\
                优先用最少的步骤解决问题。"
             .into(),
         cache_breakpoint: None,
-    }];
+    });
 
     loop {
         let render_state = RenderState {

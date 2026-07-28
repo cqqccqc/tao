@@ -59,13 +59,20 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
     let model = opts.model.unwrap_or(model);
 
     let tools = ToolRegistry::builtin();
-    let system = vec![SystemBlock {
+    let mut system: Vec<SystemBlock> = Vec::new();
+    if let Some(instr) = tao_core::instructions::load(&opts.cwd) {
+        system.push(SystemBlock {
+            text: instr,
+            cache_breakpoint: None,
+        });
+    }
+    system.push(SystemBlock {
         text: "你是 tao,一个 Rust 编写的 coding agent。\
-               你可以通过 Bash / Read / Write 工具帮助用户完成任务。\
+               你可以通过 Bash / Read / Write / Edit / Patch / Grep / Glob 工具帮助用户完成任务。\
                优先用最少的步骤解决问题。"
             .into(),
         cache_breakpoint: None,
-    }];
+    });
 
     let messages = vec![ModelMessage::User {
         content: vec![ModelContent::text(opts.prompt.clone())],

@@ -32,7 +32,7 @@ pub enum LogEvent {
         cwd: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         git_head: Option<String>,
-        /// 指令文件(TAO.md 等)hash 集,resume 时检测漂移。
+        /// 指令文件(AGENTS.md 等)hash 集,resume 时检测漂移。
         config_fingerprint: String,
         created_at_ms: u64,
     },

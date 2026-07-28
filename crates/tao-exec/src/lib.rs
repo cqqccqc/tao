@@ -165,6 +165,7 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
     let approver = HeadlessApprover {
         on_ask: opts.on_ask,
     };
+    let shadow = tao_core::ShadowRepo::init(&cwd).ok();
 
     let cancel2 = cancel.clone();
     tokio::spawn(async move {
@@ -182,6 +183,7 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
             &approver,
             &recorder,
             &config.hooks,
+            shadow.as_ref(),
             &req,
             &mut messages,
             &config_turn,
@@ -197,6 +199,7 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
             &approver,
             &recorder,
             &config.hooks,
+            shadow.as_ref(),
             &req,
             &mut messages,
             &config_turn,
@@ -215,6 +218,7 @@ async fn run_text(
     approver: &dyn Approver,
     recorder: &dyn Recorder,
     hooks: &HooksConfig,
+    shadow: Option<&tao_core::ShadowRepo>,
     req: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -233,6 +237,7 @@ async fn run_text(
         approver,
         recorder,
         hooks,
+        shadow,
         req,
         messages,
         config,
@@ -294,6 +299,7 @@ async fn run_json(
     approver: &dyn Approver,
     recorder: &dyn Recorder,
     hooks: &HooksConfig,
+    shadow: Option<&tao_core::ShadowRepo>,
     req: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -309,6 +315,7 @@ async fn run_json(
         approver,
         recorder,
         hooks,
+        shadow,
         req,
         messages,
         config,

@@ -229,6 +229,7 @@ impl AcpServer {
             &AcpApprover,
             session.recorder.as_ref(),
             &hooks,
+            None,
             &req,
             &mut session.messages,
             &config_turn,

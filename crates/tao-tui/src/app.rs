@@ -414,6 +414,7 @@ async fn handle_key(
                         &*approver,
                         &*recorder,
                         &hooks,
+                        None, // TUI v1 不 shadow 快照(TODO)
                         &req,
                         &mut messages,
                         &config,

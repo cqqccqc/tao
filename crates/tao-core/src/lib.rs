@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod agents;
+pub mod checkpoint;
 pub mod commands;
 pub mod compact;
 pub mod config;
@@ -21,6 +22,7 @@ pub mod tools;
 
 pub use agent::{Agent, AgentHandle, SessionConfig};
 pub use agents::{SubagentDef, load_agents};
+pub use checkpoint::ShadowRepo;
 pub use commands::{Builtin, CommandDef, expand, load_commands, parse_builtin, split_name_args};
 pub use compact::{DEFAULT_CONTEXT_WINDOW, DEFAULT_KEEP_LAST, approx_tokens, compact};
 pub use config::{

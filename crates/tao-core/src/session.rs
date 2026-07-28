@@ -17,13 +17,14 @@ use futures::StreamExt;
 use serde_json::Value;
 use tao_protocol::content::{Content, StopReason, TokenUsage};
 use tao_protocol::event::{ApprovalDetail, ApprovalKind};
-use tao_protocol::ids::{CallId, SessionId, TurnId};
+use tao_protocol::ids::{CallId, CheckpointId, SessionId, TurnId};
 use tao_protocol::log::LogEvent;
 use tao_protocol::op::ReviewDecision;
 use tao_protocol::permission::{PermissionMode, Verdict, VerdictSource};
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::load_agents;
+use crate::checkpoint::ShadowRepo;
 use crate::config::HooksConfig;
 use crate::hooks::{HookCtx, HookEvent, HookOutcome, run_hooks};
 use crate::model::{
@@ -109,6 +110,7 @@ pub async fn run_turn<F>(
     approver: &dyn Approver,
     recorder: &dyn Recorder,
     hooks: &HooksConfig,
+    shadow: Option<&ShadowRepo>,
     request: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -344,6 +346,23 @@ where
                     continue;
                 }
                 Verdict::Allow => {
+                    // shadow-git 快照(Edit/Write 前)
+                    if let Some(shadow) = shadow
+                        && let Some(crate::permissions::PermissionKey::Path { path }) = &key
+                    {
+                        match shadow.snapshot(std::slice::from_ref(path)) {
+                            Ok(Some(hash)) => {
+                                recorder.record(LogEvent::Checkpoint {
+                                    checkpoint_id: CheckpointId::new(
+                                        uuid::Uuid::new_v4().to_string(),
+                                    ),
+                                    shadow_commit: hash,
+                                });
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::warn!("shadow 快照失败(skip): {e}"),
+                        }
+                    }
                     // PreToolUse hook(Allow 路径;Approve/ApproveForSession v1 跳过,TODO)
                     let hook_ctx = HookCtx {
                         session_id: session_id_str.clone(),
@@ -590,6 +609,7 @@ async fn exec_task(
         &NullApprover,
         &sub_recorder,
         hooks,
+        None, // 子 agent 不快照(v1)
         &sub_req,
         &mut sub_messages,
         &sub_config,

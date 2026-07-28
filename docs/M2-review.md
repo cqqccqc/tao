@@ -1,6 +1,6 @@
 # M2/M3 实现摘要(供 code review)
 
-> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`、M2-5 `c0adfcd`、M2-6 `e0bc0c1`、M3-1 `5cc0fe3`。`cargo ci` 全绿。**M2 全部完成**(权限/工具/AGENTS.md/会话持久化/compaction/markdown),M3 进行中(slash 命令)。
+> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`、M2-5 `c0adfcd`、M2-6 `e0bc0c1`、M3-1 `5cc0fe3`、M3-2 `3102b83`。`cargo ci` 全绿。**M2 全部完成**,M3 进行中(slash 命令、hooks)。
 > 设计文档:`docs/design/{permissions,tools,config,sessions}.md`。本文是**实现层**摘要,对照代码 review 用。
 
 ---
@@ -133,6 +133,26 @@
 
 ---
 
+## M3-2 hooks(事件点 + 守门)
+
+### `tao-core/src/hooks.rs`
+- `HookEvent`:`SessionStart`/`SessionEnd`/`PreToolUse{tool}`/`PostToolUse{tool}`/`Stop`。
+- `HookConfig { matcher, command, timeout_ms }`:`matcher` 匹配 tool 名(`|` 多选/`*`)。
+- `run_hooks`:spawn `sh -c command`,stdin JSON,超时,退出码(0 Pass / 2 Block(stderr) / 其他非阻断警告+Pass)。串行(Block 短路)。最小环境(剥离 provider 凭证)。
+
+### 接入
+- `config.rs`:`HooksConfig`(按事件点 Vec,`[hooks]` PascalCase 表)+ merge(append)。
+- `session.rs::run_turn` 加 `hooks` 参数;Allow 路径 PreToolUse(Block→`ToolOutput::error`)/正常路径 PostToolUse(非阻断)。
+- exec/tui 传 `config.hooks`。
+
+### 测试
+- hooks 5 单测(Pass/Block/超时/matcher 过滤/Block 短路)。
+
+### v1 简化
+- 5 事件点;串行;不 Modify;Approve/ApproveForSession 跳过 PreToolUse(TODO);项目信任不强制(TODO)。
+
+---
+
 ## v1 简化 / TODO(留后续)
 
 | 项 | v1 现状 | TODO |
@@ -143,6 +163,7 @@
 | compaction | token 近似+自动压缩+投影 | 按模型 tokenizer、registry context_window、手动 Op::Compact、tui compact、covers_seq 对齐日志 seq |
 | markdown 渲染 | pulldown-cmark 基本元素+diff 着色 | syntect 高亮、主题、inline viewport、textwrap、行缓存 |
 | slash 命令 | 内置 /help /clear /mode /compact /sessions + markdown 模板 | /model /rewind /rollback /diff 等;exec slash;交互式参数 |
+| hooks | PreToolUse/PostToolUse/Stop/SessionStart/SessionEnd + 守门 | UserPromptSubmit/Notification/SubagentStop;Modify;并行;项目信任 |
 | Edit 先 Read | 不强制(靠唯一性+diff) | `ToolCtx` 加 `read_files` 跟踪 |
 | Patch 寻址 | L1 文本 fuzz only | L2 tree-sitter AST 锚定 |
 | Grep fallback | 无 .gitignore(跳过常见目录) | rg 优先时无此问题;fallback 可加 ignore crate |

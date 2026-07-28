@@ -1,6 +1,6 @@
 # M2 实现摘要(供 code review)
 
-> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`。`cargo ci` 全绿(fmt + clippy -D warnings + test)。
+> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`、M2-5 `c0adfcd`。`cargo ci` 全绿(fmt + clippy -D warnings + test)。
 > 设计文档:`docs/design/{permissions,tools,config,sessions}.md`。本文是**实现层**摘要,对照代码 review 用。
 
 ---
@@ -83,6 +83,22 @@
 
 ---
 
+## M2-5 compaction(上下文压缩)
+
+### `crates/tao-core/src/compact.rs`
+- `approx_tokens(messages)` = 内容字符数 / 4(近似;安全侧偏高早压缩)。`DEFAULT_CONTEXT_WINDOW=200_000`、`DEFAULT_KEEP_LAST=4`。
+- `compact(client, model, messages, keep_last, recorder)`:摘要 `messages[..len-keep]`(调 `client.stream`,结构化 prompt 目标/决策/改动/待办)→ `[Assistant(summary)] + messages[len-keep..]`;记 `Compaction { summary, covers_through_seq }`。
+
+### 接入
+- `replay.rs::apply` 的 `Compaction` 分支应用投影:摘要替代前 `covers_through_seq` 条,保留其后(keep)。
+- exec turn 前 check `approx_tokens > window * auto_compact_at` → compact(small_model 或当前 model)。
+- v1:tui 不 compact(state 同步复杂,留 TODO);自动触发 only;`Op::Compact` 手动留后续。
+
+### 测试
+- compact 3 单测(approx_tokens/compact 摘要+keep/noop when too few);replay Compaction 投影单测。
+
+---
+
 ## v1 简化 / TODO(留后续)
 
 | 项 | v1 现状 | TODO |
@@ -90,6 +106,7 @@
 | 逃逸分析 | 减少打扰,非安全边界 | M5 OS 沙箱(seatbelt/landlock) |
 | 会话授权 | resume 重放 `PermissionGrant`(M2-4 已实现) | — |
 | 会话持久化 | recorder+replay+resume/fork+sessions | index.redb、shadow-git checkpoint(M4)、rotate 续写、fs2 并发锁、config_fingerprint、tui resume |
+| compaction | token 近似+自动压缩+投影 | 按模型 tokenizer、registry context_window、手动 Op::Compact、tui compact、covers_seq 对齐日志 seq |
 | Edit 先 Read | 不强制(靠唯一性+diff) | `ToolCtx` 加 `read_files` 跟踪 |
 | Patch 寻址 | L1 文本 fuzz only | L2 tree-sitter AST 锚定 |
 | Grep fallback | 无 .gitignore(跳过常见目录) | rg 优先时无此问题;fallback 可加 ignore crate |
@@ -119,4 +136,8 @@ cargo run -p tao-cli --bin tao -- sessions ls
 cargo run -p tao-cli --bin tao -- --resume <id> exec "接着刚才的"
 cargo run -p tao-cli --bin tao -- --resume <id> --fork exec "分叉探索"
 cargo run -p tao-cli --bin tao -- sessions audit <id>
+
+# compaction:超长会话自动压缩(单测覆盖;v1 window 200k 需大量消息)
+cargo test -p tao-core --lib compact
+cargo test -p tao-core --lib replay
 ```

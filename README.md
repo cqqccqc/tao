@@ -4,7 +4,7 @@
 
 ## 状态
 
-早期设计阶段。完整技术方案见 **[docs/design/](docs/design/README.md)**:
+**M0–M4 主体完成,dogfood 可用。** 完整技术方案见 **[docs/design/](docs/design/README.md)**:
 
 - 总体架构、crate 布局、进程模型 → [architecture.md](docs/design/architecture.md)
 - core ↔ 前端协议(Op/Event)→ [protocol.md](docs/design/protocol.md)

@@ -93,15 +93,17 @@ impl AgentHandle {
 | `tools/mcp.rs` | MCP server 连接管理、工具名映射 `mcp__server__tool` |
 | `exec.rs` | 子进程执行:流式输出、超时、cancel-on-drop、输出截断 |
 | `permissions.rs` | 权限引擎(模式+规则+会话决策,纯函数 `decide`)+ `Approver` trait(审批 await,M2-1) |
-| `hooks.rs` | hook 触发点、进程执行、退出码语义 |
-| `subagent.rs` | 子 agent 构造与 Task 工具 |
-| `recorder.rs` | `LogEvent` append-only 落盘(JSONL,fsync 策略) |
-| `replay.rs` | 日志 → `SessionState` 的 fold;resume/fork |
-| `checkpoint.rs` | 影子 git 仓库快照/回滚 |
-| `compact.rs` | 上下文压缩策略 |
-| `config.rs` | 分层配置加载(figment) |
-| `auth.rs` | 凭证存储(keyring + auth.json)、OAuth PKCE |
-| `instructions.rs` | AGENTS.md 层级发现与合并 |
+| `hooks.rs` | hook 触发点、进程执行、退出码语义(M3-2) |
+| `agents.rs` | 子 agent 定义加载(`~/.tao/agents/`)+ Task 工具(M3-3) |
+| `commands.rs` | slash 命令(内置 + markdown 模板)(M3-1) |
+| `skills.rs` | 技能(SKILL.md 渐进披露)(M4-1) |
+| `checkpoint.rs` | 影子 git 仓库快照/回滚(M4-3) |
+| `recorder.rs` | `LogEvent` append-only 落盘(JSONL)(M2-4) |
+| `replay.rs` | 日志 → `SessionState` 的 fold;resume/fork(M2-4) |
+| `compact.rs` | 上下文压缩策略(M2-5) |
+| `config.rs` | 分层配置加载 + `[permissions]`/`[hooks]`/`[mcp_servers]` |
+| `auth.rs` | 凭证存储(keyring + auth.json)、OAuth PKCE(⬜ 未实现) |
+| `instructions.rs` | AGENTS.md 层级发现与合并(M2-3) |
 
 核心 trait(抽象清单刻意保持最小):
 

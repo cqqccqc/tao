@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tao_core::config::{Config, LoadOpts};
+use tao_core::config::{Config, HooksConfig, LoadOpts};
 use tao_core::model::{ModelContent, ModelMessage, ModelRequest, RequestMeta, SystemBlock};
 use tao_core::permissions::{ApprovalRequest, Approver, PermissionEngine};
 use tao_core::providers::ModelClient;
@@ -174,6 +174,7 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
             &engine,
             &approver,
             &recorder,
+            &config.hooks,
             &req,
             &mut messages,
             &config_turn,
@@ -188,6 +189,7 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
             &engine,
             &approver,
             &recorder,
+            &config.hooks,
             &req,
             &mut messages,
             &config_turn,
@@ -205,6 +207,7 @@ async fn run_text(
     engine: &PermissionEngine,
     approver: &dyn Approver,
     recorder: &dyn Recorder,
+    hooks: &HooksConfig,
     req: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -222,6 +225,7 @@ async fn run_text(
         engine,
         approver,
         recorder,
+        hooks,
         req,
         messages,
         config,
@@ -282,6 +286,7 @@ async fn run_json(
     engine: &PermissionEngine,
     approver: &dyn Approver,
     recorder: &dyn Recorder,
+    hooks: &HooksConfig,
     req: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -296,6 +301,7 @@ async fn run_json(
         engine,
         approver,
         recorder,
+        hooks,
         req,
         messages,
         config,

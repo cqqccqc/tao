@@ -7,6 +7,7 @@ pub mod agent;
 pub mod commands;
 pub mod compact;
 pub mod config;
+pub mod hooks;
 pub mod instructions;
 pub mod model;
 pub mod permissions;
@@ -20,9 +21,10 @@ pub use agent::{Agent, AgentHandle, SessionConfig};
 pub use commands::{Builtin, CommandDef, expand, load_commands, parse_builtin, split_name_args};
 pub use compact::{DEFAULT_CONTEXT_WINDOW, DEFAULT_KEEP_LAST, approx_tokens, compact};
 pub use config::{
-    AnthropicAuth, CliOverride, Config, LoadOpts, ModelProviderConfig, PartialConfig,
+    AnthropicAuth, CliOverride, Config, HooksConfig, LoadOpts, ModelProviderConfig, PartialConfig,
     SessionsConfig, WireApi,
 };
+pub use hooks::{HookConfig, HookCtx, HookEvent, HookOutcome, run_hooks};
 pub use model::{ModelError, ModelRequest, ModelStreamEvent};
 pub use permissions::{ApprovalRequest, Approver, PermissionEngine, PermissionKey};
 pub use providers::ModelClient;

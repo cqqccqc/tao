@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::hooks::HookConfig;
 use serde::{Deserialize, Serialize};
 use tao_protocol::permission::{PermissionMode, PermissionRule};
 
@@ -65,6 +66,7 @@ pub struct Config {
     pub profiles: HashMap<String, PartialConfig>,
     pub sessions: SessionsConfig,
     pub permissions: PermissionsConfig,
+    pub hooks: HooksConfig,
 }
 
 impl Default for Config {
@@ -108,6 +110,7 @@ impl Default for Config {
             sessions: SessionsConfig::default(),
             profiles: HashMap::new(),
             permissions: PermissionsConfig::default(),
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -134,6 +137,38 @@ impl Default for SessionsConfig {
 #[serde(default)]
 pub struct PermissionsConfig {
     pub rules: Vec<PermissionRule>,
+}
+
+/// hooks 配置(`[hooks]` 表,按事件点)。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "PascalCase")]
+pub struct HooksConfig {
+    pub pre_tool_use: Vec<HookConfig>,
+    pub post_tool_use: Vec<HookConfig>,
+    pub session_start: Vec<HookConfig>,
+    pub session_end: Vec<HookConfig>,
+    pub stop: Vec<HookConfig>,
+}
+
+impl HooksConfig {
+    /// 合并(各事件点 Vec append,用户级 + 项目级都生效)。
+    pub fn merge(&mut self, other: &HooksConfig) {
+        self.pre_tool_use.extend(other.pre_tool_use.iter().cloned());
+        self.post_tool_use
+            .extend(other.post_tool_use.iter().cloned());
+        self.session_start
+            .extend(other.session_start.iter().cloned());
+        self.session_end.extend(other.session_end.iter().cloned());
+        self.stop.extend(other.stop.iter().cloned());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pre_tool_use.is_empty()
+            && self.post_tool_use.is_empty()
+            && self.session_start.is_empty()
+            && self.session_end.is_empty()
+            && self.stop.is_empty()
+    }
 }
 
 /// profile 覆盖:任意顶层字段的可选版本。
@@ -308,6 +343,9 @@ impl Config {
         if let Some(perm) = &p.permissions {
             self.permissions.rules.extend(perm.rules.iter().cloned());
         }
+        if let Some(h) = &p.hooks {
+            self.hooks.merge(h);
+        }
     }
 
     fn apply_partial(&mut self, p: &PartialConfig) {
@@ -425,6 +463,7 @@ struct PartialFileConfig {
     profiles: HashMap<String, PartialConfig>,
     sessions: Option<PartialSessionsConfig>,
     permissions: Option<PartialPermissionsConfig>,
+    hooks: Option<HooksConfig>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

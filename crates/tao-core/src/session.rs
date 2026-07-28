@@ -22,6 +22,8 @@ use tao_protocol::op::ReviewDecision;
 use tao_protocol::permission::{Verdict, VerdictSource};
 use tokio_util::sync::CancellationToken;
 
+use crate::config::HooksConfig;
+use crate::hooks::{HookCtx, HookEvent, HookOutcome, run_hooks};
 use crate::model::{ModelContent, ModelMessage, ModelRequest, ModelStreamEvent};
 use crate::permissions::{Approver, PermissionEngine, approval_request};
 use crate::providers::ModelClient;
@@ -102,6 +104,7 @@ pub async fn run_turn<F>(
     engine: &PermissionEngine,
     approver: &dyn Approver,
     recorder: &dyn Recorder,
+    hooks: &HooksConfig,
     request: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -114,6 +117,7 @@ where
 {
     let mut steps: u32 = 0;
     let turn_id = TurnId::new(request.metadata.turn_id.clone().unwrap_or_default());
+    let session_id_str = request.metadata.session_id.clone().unwrap_or_default();
 
     loop {
         steps += 1;
@@ -301,6 +305,36 @@ where
                     continue;
                 }
                 Verdict::Allow => {
+                    // PreToolUse hook(Allow 路径;Approve/ApproveForSession v1 跳过,TODO)
+                    let hook_ctx = HookCtx {
+                        session_id: session_id_str.clone(),
+                        cwd: cwd.to_path_buf(),
+                        tool_name: Some(tool_name.to_string()),
+                        tool_input: Some(input.clone()),
+                    };
+                    if let HookOutcome::Block(reason) = run_hooks(
+                        &HookEvent::PreToolUse {
+                            tool: tool_name.to_string(),
+                        },
+                        &hooks.pre_tool_use,
+                        &hook_ctx,
+                    )
+                    .await
+                    {
+                        let msg = format!("被 hook 阻断: {reason}");
+                        on_event(TurnEvent::ToolExecEnd {
+                            call_id: call_id.clone(),
+                            ok: false,
+                            summary: "hook 阻断".into(),
+                        });
+                        messages.push(ModelMessage::ToolResult {
+                            call_id: call_id.clone(),
+                            content: vec![ModelContent::Text(msg.clone())],
+                            is_error: true,
+                        });
+                        record_tool_result(recorder, call_id, &msg, true, duration_ms);
+                        continue;
+                    }
                     on_event(TurnEvent::ToolExecBegin {
                         call_id: call_id.clone(),
                     });
@@ -404,6 +438,21 @@ where
                 is_error,
             });
             record_tool_result(recorder, call_id, &content, is_error, duration_ms);
+            // PostToolUse hook(非阻断,不影响结果)
+            let post_ctx = HookCtx {
+                session_id: session_id_str.clone(),
+                cwd: cwd.to_path_buf(),
+                tool_name: Some(tool_name.to_string()),
+                tool_input: Some(input.clone()),
+            };
+            let _ = run_hooks(
+                &HookEvent::PostToolUse {
+                    tool: tool_name.to_string(),
+                },
+                &hooks.post_tool_use,
+                &post_ctx,
+            )
+            .await;
         }
         // 循环:带着工具结果再问模型。
     }

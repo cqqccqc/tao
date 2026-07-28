@@ -171,6 +171,7 @@ async fn run_with_full(
         engine,
         approver,
         &tao_core::NullRecorder,
+        &tao_core::HooksConfig::default(),
         &req,
         messages,
         &config,

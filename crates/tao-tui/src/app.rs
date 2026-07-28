@@ -17,6 +17,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use tao_core::HooksConfig;
 use tao_core::config::{Config, LoadOpts};
 use tao_core::model::{ModelContent, ModelMessage, ModelRequest, RequestMeta, SystemBlock};
 use tao_core::permissions::{ApprovalRequest, Approver, PermissionEngine};
@@ -112,6 +113,7 @@ async fn run_with_opts(opts: TuiOpts) -> anyhow::Result<()> {
         &opts.cwd,
         engine,
         recorder,
+        config.hooks,
         session_id,
     )
     .await;
@@ -149,6 +151,7 @@ impl UiState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn app_loop(
     terminal: &mut Term,
     client: Arc<dyn ModelClient>,
@@ -156,6 +159,7 @@ async fn app_loop(
     cwd: &std::path::Path,
     engine: Arc<PermissionEngine>,
     recorder: Arc<JsonlRecorder>,
+    hooks: HooksConfig,
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let mut state = UiState::new(engine.mode());
@@ -207,7 +211,7 @@ async fn app_loop(
 
         tokio::select! {
             Some(key) = key_rx.recv() => {
-                if handle_key(key, &mut state, &client, &tools, &system, &model, cwd, &turn_tx, &engine, &approver, &recorder, &session_id).await? {
+                if handle_key(key, &mut state, &client, &tools, &system, &model, cwd, &turn_tx, &engine, &approver, &recorder, &hooks, &session_id).await? {
                     return Ok(());
                 }
             }
@@ -232,6 +236,7 @@ async fn handle_key(
     engine: &Arc<PermissionEngine>,
     approver: &Arc<TuiApprover>,
     recorder: &Arc<JsonlRecorder>,
+    hooks: &HooksConfig,
     session_id: &SessionId,
 ) -> anyhow::Result<bool> {
     // 审批弹窗优先处理按键(y/s/n/a)
@@ -374,6 +379,7 @@ async fn handle_key(
                 let engine = engine.clone();
                 let approver = approver.clone();
                 let recorder = recorder.clone();
+                let hooks = hooks.clone();
                 let session_id = session_id.clone();
 
                 tokio::spawn(async move {
@@ -397,6 +403,7 @@ async fn handle_key(
                         &engine,
                         &*approver,
                         &*recorder,
+                        &hooks,
                         &req,
                         &mut messages,
                         &config,

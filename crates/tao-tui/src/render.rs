@@ -82,36 +82,19 @@ pub fn draw(f: &mut Frame, state: &RenderState) {
                 ]));
             }
             HistoryCell::Assistant(t) => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "tao ",
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(t),
-                ]));
+                push_assistant_lines(&mut lines, t);
             }
             HistoryCell::Tool(s) => {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("  {s}"),
-                    Style::default().fg(Color::DarkGray),
-                )]));
+                for l in diff_lines(s) {
+                    lines.push(l);
+                }
             }
         }
     }
 
-    // live text(进行中的 assistant 消息)
+    // live text(进行中的 assistant 消息,流式 markdown)
     if !state.live_text.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "tao ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(state.live_text),
-        ]));
+        push_assistant_lines(&mut lines, state.live_text);
     }
 
     if state.history.is_empty() && state.live_text.is_empty() {
@@ -269,4 +252,174 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+// ---- markdown / diff 渲染 ----
+
+/// assistant 文本:第一行带 "tao " 前缀,后续 markdown 渲染行。
+fn push_assistant_lines(lines: &mut Vec<Line>, text: &str) {
+    let prefix = Span::styled(
+        "tao ",
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    );
+    let md = markdown_to_lines(text);
+    match md.first() {
+        Some(first) => {
+            let mut spans = vec![prefix];
+            spans.extend(first.spans.iter().cloned());
+            lines.push(Line::from(spans));
+        }
+        None => lines.push(Line::from(prefix)),
+    }
+    for l in md.iter().skip(1) {
+        lines.push(l.clone());
+    }
+}
+
+/// markdown → ratatui Lines(标题/段落/列表/代码块/行内代码/强调/Rule)。
+fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    let parser = Parser::new(text);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut spans: Vec<Span> = Vec::new();
+    let mut style = Style::default();
+    let mut in_code = false;
+    let mut list_depth: usize = 0;
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading { .. }) => {
+                push_line(&mut spans, &mut lines);
+                style = Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(Color::Cyan);
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                push_line(&mut spans, &mut lines);
+                style = Style::default();
+            }
+            Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => {
+                push_line(&mut spans, &mut lines);
+            }
+            Event::Start(Tag::CodeBlock(_)) => {
+                push_line(&mut spans, &mut lines);
+                in_code = true;
+                style = Style::default().fg(Color::Gray);
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                push_line(&mut spans, &mut lines);
+                in_code = false;
+                style = Style::default();
+            }
+            Event::Start(Tag::List(_)) => list_depth += 1,
+            Event::End(TagEnd::List(_)) => list_depth = list_depth.saturating_sub(1),
+            Event::Start(Tag::Item) => {
+                push_line(&mut spans, &mut lines);
+                spans.push(Span::raw(format!(
+                    "{}• ",
+                    "  ".repeat(list_depth.saturating_sub(1))
+                )));
+            }
+            Event::End(TagEnd::Item) => push_line(&mut spans, &mut lines),
+            Event::Start(Tag::Emphasis) => style = style.add_modifier(Modifier::ITALIC),
+            Event::End(TagEnd::Emphasis) => style = style.remove_modifier(Modifier::ITALIC),
+            Event::Start(Tag::Strong) => style = style.add_modifier(Modifier::BOLD),
+            Event::End(TagEnd::Strong) => style = style.remove_modifier(Modifier::BOLD),
+            Event::Text(t) => {
+                if in_code {
+                    for (i, l) in t.split('\n').enumerate() {
+                        if i > 0 {
+                            push_line(&mut spans, &mut lines);
+                        }
+                        if !l.is_empty() {
+                            spans.push(Span::styled(format!("  {l}"), style));
+                        }
+                    }
+                } else {
+                    spans.push(Span::styled(t.to_string(), style));
+                }
+            }
+            Event::Code(c) => spans.push(Span::styled(
+                c.to_string(),
+                Style::default().fg(Color::Yellow),
+            )),
+            Event::SoftBreak | Event::HardBreak => push_line(&mut spans, &mut lines),
+            Event::Rule => {
+                push_line(&mut spans, &mut lines);
+                lines.push(Line::raw("─"));
+            }
+            _ => {}
+        }
+    }
+    push_line(&mut spans, &mut lines);
+    lines
+}
+
+/// diff/工具输出:行首 +/-/@@/---/+++ 着色。
+fn diff_lines(text: &str) -> Vec<Line<'static>> {
+    text.lines()
+        .map(|l| {
+            let style = if l.starts_with('+') {
+                Style::default().fg(Color::Green)
+            } else if l.starts_with('-') {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            Line::from(vec![Span::styled(format!("  {l}"), style)])
+        })
+        .collect()
+}
+
+fn push_line<'a>(spans: &mut Vec<Span<'a>>, lines: &mut Vec<Line<'a>>) {
+    if !spans.is_empty() {
+        lines.push(Line::from(std::mem::take(spans)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_heading_and_text() {
+        let lines = markdown_to_lines("# 标题\n正文");
+        assert!(lines.len() >= 2);
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(joined.contains("标题"));
+        assert!(joined.contains("正文"));
+    }
+
+    #[test]
+    fn markdown_code_block() {
+        let lines = markdown_to_lines("```\nfn main() {}\n```");
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(joined.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn markdown_inline_code() {
+        let lines = markdown_to_lines("用 `cargo` 构建");
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(joined.contains("cargo"));
+    }
+
+    #[test]
+    fn diff_lines_coloring() {
+        let lines = diff_lines("+added\n-removed\n ctx");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Green));
+        assert_eq!(lines[1].spans[0].style.fg, Some(Color::Red));
+    }
 }

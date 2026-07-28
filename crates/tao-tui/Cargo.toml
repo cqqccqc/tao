@@ -18,3 +18,4 @@ tokio-util.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 uuid.workspace = true
+pulldown-cmark.workspace = true

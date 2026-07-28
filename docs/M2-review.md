@@ -1,6 +1,6 @@
 # M2 实现摘要(供 code review)
 
-> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`、M2-5 `c0adfcd`。`cargo ci` 全绿(fmt + clippy -D warnings + test)。
+> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`、M2-5 `c0adfcd`、M2-6 `e0bc0c1`。`cargo ci` 全绿。**M2 全部完成**(权限/工具/AGENTS.md/会话持久化/compaction/markdown),可 dogfood。
 > 设计文档:`docs/design/{permissions,tools,config,sessions}.md`。本文是**实现层**摘要,对照代码 review 用。
 
 ---
@@ -99,6 +99,21 @@
 
 ---
 
+## M2-6 markdown 流式渲染(TUI)
+
+### `tao-tui/src/render.rs`
+- `markdown_to_lines(text)`:pulldown-cmark 解析 → ratatui `Line`/`Span`。支持标题(粗体青)、段落、列表(• 缩进)、代码块(灰缩进)、行内代码(黄)、`**粗体**`/`*斜体*`、`---` Rule。
+- `diff_lines(text)`:行首 `+`绿/`-`红/其余灰(工具输出与 diff 着色)。
+- `draw` 历史区:`Assistant`/`live_text` 用 `markdown_to_lines`(第一行带 "tao " 前缀);`Tool` 用 `diff_lines`。
+
+### 测试
+- 4 单测(markdown 标题/代码块/行内代码;diff 着色)。
+
+### v1 简化
+- 不 syntect 语法高亮(代码块纯样式);不主题(TOML);不 inline viewport(保留 alternate screen);不 textwrap/unicode-width(ratatui Wrap);不行缓存;流式 live_text 每帧解析(容忍不完整)。
+
+---
+
 ## v1 简化 / TODO(留后续)
 
 | 项 | v1 现状 | TODO |
@@ -107,6 +122,7 @@
 | 会话授权 | resume 重放 `PermissionGrant`(M2-4 已实现) | — |
 | 会话持久化 | recorder+replay+resume/fork+sessions | index.redb、shadow-git checkpoint(M4)、rotate 续写、fs2 并发锁、config_fingerprint、tui resume |
 | compaction | token 近似+自动压缩+投影 | 按模型 tokenizer、registry context_window、手动 Op::Compact、tui compact、covers_seq 对齐日志 seq |
+| markdown 渲染 | pulldown-cmark 基本元素+diff 着色 | syntect 高亮、主题、inline viewport、textwrap、行缓存 |
 | Edit 先 Read | 不强制(靠唯一性+diff) | `ToolCtx` 加 `read_files` 跟踪 |
 | Patch 寻址 | L1 文本 fuzz only | L2 tree-sitter AST 锚定 |
 | Grep fallback | 无 .gitignore(跳过常见目录) | rg 优先时无此问题;fallback 可加 ignore crate |

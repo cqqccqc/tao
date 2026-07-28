@@ -1,6 +1,6 @@
-# M2 实现摘要(供 code review)
+# M2/M3 实现摘要(供 code review)
 
-> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`、M2-5 `c0adfcd`、M2-6 `e0bc0c1`。`cargo ci` 全绿。**M2 全部完成**(权限/工具/AGENTS.md/会话持久化/compaction/markdown),可 dogfood。
+> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`、M2-5 `c0adfcd`、M2-6 `e0bc0c1`、M3-1 `5cc0fe3`。`cargo ci` 全绿。**M2 全部完成**(权限/工具/AGENTS.md/会话持久化/compaction/markdown),M3 进行中(slash 命令)。
 > 设计文档:`docs/design/{permissions,tools,config,sessions}.md`。本文是**实现层**摘要,对照代码 review 用。
 
 ---
@@ -114,6 +114,25 @@
 
 ---
 
+## M3-1 slash 命令
+
+### `tao-core/src/commands.rs`
+- `CommandDef { name, description, argument_hint, body }`:markdown 命令(frontmatter + body)。
+- `load_commands(cwd)`:发现 `~/.tao/commands/` + `<cwd>/.tao/commands/`(项目优先,同名覆盖);`expand(body, args, cwd)`:`` !`cmd` `` 执行注入 + `$ARGUMENTS` 替换。
+- `Builtin`:`Help`/`Clear`/`Mode(PermissionMode)`/`ModeCycle`/`Compact`/`Sessions`;`parse_builtin` + `split_name_args`。
+
+### TUI `/` 触发(`tao-tui/src/app.rs`)
+- handle_key Enter:`/` 开头 → 内置命令(`/help` 列命令、`/clear` 清历史、`/mode [default|plan|accept-edits]` 切模式、`/mode` 循环、`/compact` 压缩、`/sessions` 列会话);非内置 → markdown 模板展开为 user 消息走 run_turn。
+- `/compact` 同步 await compact(M2-5);`/sessions` 扫描 session_dir(M2-4)。
+
+### 测试
+- commands 6 单测(parse_builtin/split_name_args/expand 参数+命令注入/load_commands/frontmatter)。
+
+### v1 简化
+- 内置只 `/help /clear /mode /compact /sessions`;`/model /rewind /rollback /diff /cost /hooks /mcp /agent /init` 留后续;slash 只 TUI;`/compact` 同步(UI 短暂冻结)。
+
+---
+
 ## v1 简化 / TODO(留后续)
 
 | 项 | v1 现状 | TODO |
@@ -123,6 +142,7 @@
 | 会话持久化 | recorder+replay+resume/fork+sessions | index.redb、shadow-git checkpoint(M4)、rotate 续写、fs2 并发锁、config_fingerprint、tui resume |
 | compaction | token 近似+自动压缩+投影 | 按模型 tokenizer、registry context_window、手动 Op::Compact、tui compact、covers_seq 对齐日志 seq |
 | markdown 渲染 | pulldown-cmark 基本元素+diff 着色 | syntect 高亮、主题、inline viewport、textwrap、行缓存 |
+| slash 命令 | 内置 /help /clear /mode /compact /sessions + markdown 模板 | /model /rewind /rollback /diff 等;exec slash;交互式参数 |
 | Edit 先 Read | 不强制(靠唯一性+diff) | `ToolCtx` 加 `read_files` 跟踪 |
 | Patch 寻址 | L1 文本 fuzz only | L2 tree-sitter AST 锚定 |
 | Grep fallback | 无 .gitignore(跳过常见目录) | rg 优先时无此问题;fallback 可加 ignore crate |

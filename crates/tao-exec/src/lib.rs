@@ -123,6 +123,21 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
         content: vec![ModelContent::text(&opts.prompt)],
     });
 
+    // auto compact:token 估算超阈值则用 small_model(或当前 model)压缩
+    let threshold = (tao_core::DEFAULT_CONTEXT_WINDOW as f32 * config.auto_compact_at) as u64;
+    if tao_core::approx_tokens(&messages) > threshold {
+        let cm = config.small_model.as_deref().unwrap_or(&model);
+        messages = tao_core::compact(
+            client.as_ref(),
+            cm,
+            &messages,
+            tao_core::DEFAULT_KEEP_LAST,
+            &recorder,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("上下文压缩失败: {e}"))?;
+    }
+
     let req = ModelRequest {
         model,
         system,

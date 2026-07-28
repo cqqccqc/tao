@@ -1,8 +1,8 @@
 //! 会话重放:JSONL 日志 → SessionState fold(见 docs/design/sessions.md §1)。
 //!
 //! `fold(LogEvent*) = SessionState`。replay 用于 resume(重建 messages/grants/mode)。
-//! v1:Compaction 事件识别但未应用(M2-5);ToolCall/Approval/PermissionDecision 等审计事件
-//! 不影响 messages/grants/mode 投影。
+//! Compaction 事件应用投影(摘要替代被覆盖消息,M2-5);ToolCall/Approval/PermissionDecision
+//! 等审计事件不影响 messages/grants/mode 投影。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -100,8 +100,22 @@ fn apply(state: &mut SessionState, event: LogEvent) {
             state.session_grants.insert((tool, pattern));
         }
         LogEvent::ModeChange { mode } => state.mode = mode,
-        LogEvent::Compaction { .. } => {
-            // v1 TODO(M2-5):截断 messages 到 covers_through_seq + push summary
+        LogEvent::Compaction {
+            summary,
+            covers_through_seq,
+        } => {
+            // 投影:用摘要替代前 covers_through_seq 条消息,保留其后(keep)。
+            let covers = covers_through_seq as usize;
+            let kept: Vec<ModelMessage> = if covers < state.messages.len() {
+                state.messages[covers..].to_vec()
+            } else {
+                Vec::new()
+            };
+            state.messages.clear();
+            state.messages.push(ModelMessage::Assistant {
+                content: summary.into_iter().map(content_to_model).collect(),
+            });
+            state.messages.extend(kept);
         }
         // ToolCall/Approval/PermissionDecision/Checkpoint/TurnBoundary/Error:
         // 审计/边界事件,不影响 messages/grants/mode 投影。
@@ -199,6 +213,52 @@ mod tests {
             );
         } else {
             panic!("期望 ToolResult");
+        }
+    }
+
+    #[test]
+    fn replay_applies_compaction_projection() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (recorder, _id) = JsonlRecorder::create_with_base(&cwd, dir.path()).unwrap();
+        recorder.record(LogEvent::UserInput {
+            content: vec![Content::text("msg1")],
+            turn_id: TurnId::new("t1"),
+        });
+        recorder.record(LogEvent::AssistantMessage {
+            content: vec![Content::text("a1")],
+            usage: Default::default(),
+            turn_id: TurnId::new("t1"),
+        });
+        // 摘要前 1 条(msg1),保留 a1
+        recorder.record(LogEvent::Compaction {
+            summary: vec![Content::text("摘要")],
+            covers_through_seq: 1,
+        });
+        recorder.record(LogEvent::UserInput {
+            content: vec![Content::text("msg2")],
+            turn_id: TurnId::new("t2"),
+        });
+
+        let state = replay(recorder.path()).unwrap();
+        // [Assistant(摘要)] + [a1](kept) + [msg2]
+        assert_eq!(state.messages.len(), 3);
+        if let ModelMessage::Assistant { content } = &state.messages[0] {
+            assert!(
+                content
+                    .iter()
+                    .any(|c| matches!(c, ModelContent::Text(t) if t == "摘要"))
+            );
+        } else {
+            panic!("期望 Assistant(摘要)");
+        }
+        if let ModelMessage::Assistant { content } = &state.messages[1] {
+            assert!(
+                content
+                    .iter()
+                    .any(|c| matches!(c, ModelContent::Text(t) if t == "a1"))
+            );
         }
     }
 }

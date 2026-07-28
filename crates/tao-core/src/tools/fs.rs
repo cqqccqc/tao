@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use tokio::fs;
 
 use crate::model::ToolSpec;
+use crate::permissions::PermissionKey;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolOutput};
 
 // ---- Read ----
@@ -32,6 +33,13 @@ impl Tool for ReadTool {
                 "required": ["path"]
             }),
         }
+    }
+
+    fn permission_key(&self, args: &Value, cwd: &Path) -> Option<PermissionKey> {
+        let p = args.get("path")?.as_str()?;
+        Some(PermissionKey::Path {
+            path: resolve_path(cwd, p),
+        })
     }
 
     async fn call(&self, args: &Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
@@ -119,6 +127,13 @@ impl Tool for WriteTool {
                 "required": ["path", "content"]
             }),
         }
+    }
+
+    fn permission_key(&self, args: &Value, cwd: &Path) -> Option<PermissionKey> {
+        let p = args.get("path")?.as_str()?;
+        Some(PermissionKey::Path {
+            path: resolve_path(cwd, p),
+        })
     }
 
     async fn call(&self, args: &Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {

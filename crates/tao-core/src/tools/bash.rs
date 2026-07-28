@@ -9,6 +9,7 @@
 //! - 超时 + cancel-on-drop:进程组整体处理,不留孤儿。
 //! - 输出截断:超阈值保留头尾,中间标记 `[... N bytes truncated ...]`。
 
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use tokio::process::Command;
 use tokio::time::Instant;
 
 use crate::model::ToolSpec;
+use crate::permissions::PermissionKey;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolOutput};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -62,19 +64,15 @@ impl Tool for BashTool {
         }
     }
 
-    async fn call(&self, args: &Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
-        let command: Vec<String> = args
-            .get("command")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| ToolError::InvalidArgs("command 必须是字符串数组".into()))?
-            .iter()
-            .map(|v| {
-                v.as_str()
-                    .map(String::from)
-                    .ok_or_else(|| ToolError::InvalidArgs("command 元素必须是字符串".into()))
-            })
-            .collect::<Result<_, _>>()?;
+    fn permission_key(&self, args: &Value, _cwd: &Path) -> Option<PermissionKey> {
+        parse_command(args)
+            .filter(|c| !c.is_empty())
+            .map(|command| PermissionKey::Bash { command })
+    }
 
+    async fn call(&self, args: &Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
+        let command = parse_command(args)
+            .ok_or_else(|| ToolError::InvalidArgs("command 必须是字符串数组".into()))?;
         if command.is_empty() {
             return Err(ToolError::InvalidArgs("command 不能为空".into()));
         }
@@ -172,6 +170,17 @@ impl Tool for BashTool {
             is_error: !exit_status.success(),
         })
     }
+}
+
+/// 从 args 解析 command argv(lenient:任一元素非字符串或缺失则返回 None)。
+/// `permission_key` 与 `call` 共用,保证权限判定与实际执行看同一个 command。
+fn parse_command(args: &Value) -> Option<Vec<String>> {
+    let arr = args.get("command")?.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        out.push(v.as_str()?.to_string());
+    }
+    Some(out)
 }
 
 /// 截断输出:保留头 OUTPUT_HEAD + 尾 OUTPUT_TAIL,中间丢弃。

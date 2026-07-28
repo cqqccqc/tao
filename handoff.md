@@ -1,6 +1,6 @@
 # tao 交接文档
 
-> 用于在另一台机器上继续开发。最后更新:2026-07-27,对应 commit `cc1a340` 之后。
+> 用于在另一台机器上继续开发。最后更新:2026-07-28,M2-1 权限引擎 + 审批弹窗完成。
 
 ## 项目状态速览
 
@@ -13,10 +13,11 @@ tao 是一个用 Rust 构建的 coding agent,对标 Claude Code / codex CLI / ge
 | M0 骨架 | ✅ 完成 | 9 crate workspace + 协议类型(Op/Event/LogEvent)+ CI |
 | M1 会说话的 loop | ✅ 完成 | 三协议 provider codec + Bash/Read/Write 工具 + turn loop + tao exec + 最小 TUI |
 | M2 配置体系 | ✅ 完成(提前) | 分层 config.toml + provider 注册表 + -c/--profile/--model CLI |
-| M2 其余 | ⬜ 未开始 | 权限引擎+审批、Edit/Patch、Grep/Glob、会话持久化、compaction、markdown 渲染 |
+| M2-1 权限引擎 | ✅ 完成 | 三层判定(模式×规则×会话决策)+ 逃逸分析 + Approver trait + TUI 审批弹窗 + exec on_ask + bypass flag |
+| M2 其余 | ⬜ 未开始 | Edit/Patch、Grep/Glob、会话持久化、compaction、markdown 渲染 |
 | M3–M6 | ⬜ 未开始 | MCP/hooks/子agent、ACP、shadow-git checkpoint、OS 沙箱、web-ui |
 
-**测试:66 个全过,`cargo ci` 全绿(fmt + clippy -D warnings + test)。**
+**测试:`cargo ci` 全绿(fmt + clippy -D warnings + test)。含权限引擎 18 单测 + turn_loop 审批往返矩阵(Allow/Deny/Ask→Approve/Deny/Abort、Plan 拒写、ApproveForSession、allow 规则跳过)。**
 
 ## 在另一台机器上续开发
 
@@ -103,8 +104,9 @@ tao/
 │   ├── tao-protocol/      # Op/Event/LogEvent 线协议类型(纯 serde,无 core 依赖)
 │   ├── tao-core/          # 通用 agent harness(本项目核心)
 │   │   ├── src/
-│   │   │   ├── config.rs       # 分层配置 + provider 定义(M2)
+│   │   │   ├── config.rs       # 分层配置 + provider 定义 + [permissions] rules(M2)
 │   │   │   ├── model.rs        # 规范模型格式(ModelRequest/ModelStreamEvent/ModelError)
+│   │   │   ├── permissions.rs  # 权限引擎:三层判定 + 逃逸分析 + Approver trait(M2-1)
 │   │   │   ├── session.rs      # turn loop 主循环(run_turn)
 │   │   │   ├── providers/      # ModelClient trait + 三个 codec + 公共 HTTP/SSE 层 + registry
 │   │   │   │   ├── mod.rs
@@ -134,15 +136,16 @@ tao/
 3. **Tool 错误也是输出**:`ToolError` 不上抛,转成 `ToolOutput::error` 回灌给模型。模型看到"工具失败"会自我修正。
 4. **config 分层**:默认 < `~/.tao/config.toml` < `<repo>/.tao/config.toml` < `TAO_*` 环境变量 < `--profile` < `-c key=value`。
 5. **Anthropic 双 auth**:`anthropic_auth = "api-key"`(原生,`x-api-key`头)或 `"bearer"`(代理网关,`Authorization: Bearer`)。
+6. **权限三层 + Approver trait**:`PermissionEngine.decide` = `first_match(会话决策, 规则引擎, 模式默认值)`;`Ask` 时 `run_turn` 经 `Approver` trait await 前端(TUI 弹窗 / exec 按 `--on-ask`)。逃逸分析 v1 只减少打扰(非安全边界,M5 OS 沙箱兜底);不可解析⇒升级 Ask。`Tool::permission_key` 声明权限维度(Bash argv / Path / Domain)。
 
 ## 已知问题与局限
 
-### M1 局限(M2 会修)
-- **TUI 无法中途中断 turn**:`run_turn` 是同步回调式,cancel 句柄没暴露给 UI。M2 的 `AgentHandle` actor 会解决。
+### M1 局限(逐步修复中)
+- **TUI 无法中途中断 turn**:`run_turn` 是同步回调式,cancel 句柄没暴露给 UI。审批 await 期间可响应按键,但 turn 中断仍留 `AgentHandle` actor(M2 后续)。
 - **单行输入**:无 tui-textarea,多行/粘贴/历史搜索留 M2。
 - **纯文本渲染**:无 markdown/代码高亮/diff 视图,留 M2。
-- **无审批**:工具直接执行,权限引擎+审批弹窗留 M2。
-- **无会话持久化**:turn 结果不落盘,JSONL 日志留 M2。
+- ~~无审批~~ → ✅ M2-1 已实现(权限三层 + TUI 弹窗 + exec on_ask)。
+- **无会话持久化**:turn 结果不落盘,JSONL 日志留 M2。ApproveForSession 的会话授权目前仅内存(resume 重放留会话持久化任务)。
 
 ### 配置体系测试结论(2026-07-27)
 用美团 AIGC 网关(`https://aigc.sankuai.com/v1/anthropic`)测试时:
@@ -157,7 +160,7 @@ tao/
 
 ## 下一步(M2 剩余,按建议顺序)
 
-1. **权限引擎 + 审批弹窗**——`permissions.rs`:模式(default/plan/accept-edits/bypass)+ 规则引擎 + `ApprovalRequest` 事件 + TUI 弹窗。这是"安全用 agent"的前提。
+1. ✅ **权限引擎 + 审批弹窗**(M2-1 已完成):`permissions.rs` + `Tool::permission_key` + `Approver` trait + TUI 弹窗 + exec `--on-ask` + `--dangerously-bypass-permissions`。
 2. **Edit/Patch 工具 + Grep/Glob**——`tools/edit.rs` + `tao-apply-patch` 实现 + `tools/grep.rs`。编码工作流闭环。
 3. **会话持久化**——`recorder.rs` + `replay.rs`:JSONL 事件日志 + resume/fork。
 4. **TAO.md 指令文件**——`instructions.rs`:层级发现,注入 system prompt。

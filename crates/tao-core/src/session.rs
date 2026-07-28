@@ -11,10 +11,14 @@ use std::sync::Arc;
 use futures::StreamExt;
 use serde_json::Value;
 use tao_protocol::content::StopReason;
+use tao_protocol::event::{ApprovalDetail, ApprovalKind};
 use tao_protocol::ids::CallId;
+use tao_protocol::op::ReviewDecision;
+use tao_protocol::permission::{Verdict, VerdictSource};
 use tokio_util::sync::CancellationToken;
 
 use crate::model::{ModelContent, ModelMessage, ModelRequest, ModelStreamEvent};
+use crate::permissions::{Approver, PermissionEngine, approval_request};
 use crate::providers::ModelClient;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolOutput, ToolRegistry};
 
@@ -41,6 +45,17 @@ pub enum TurnEvent {
     ModelMessageEnd { stop_reason: StopReason },
     /// 整个 turn 结束。
     TurnComplete { stop_reason: StopReason, steps: u32 },
+    /// 需要用户审批(Ask 判定):前端渲染弹窗,等待按键应答。
+    ApprovalRequest {
+        call_id: CallId,
+        kind: ApprovalKind,
+        detail: ApprovalDetail,
+    },
+    /// 审批已解决(用户做了决定)。
+    ApprovalResolved {
+        call_id: CallId,
+        decision: ReviewDecision,
+    },
     /// 错误(turn 终止)。
     Error(String),
 }
@@ -72,11 +87,14 @@ impl Default for TurnConfig {
 /// `messages` 是已有历史(可空);本函数会向其追加 user 输入、assistant 消息、
 /// tool_result 等,循环直到模型不再调用工具。
 ///
+/// `engine` 做权限判定,`approver` 在 Ask 判定时等待前端应答。
 /// `on_event` 是同步回调(消费 TurnEvent);TUI/exec 各自实现。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn<F>(
     client: &dyn ModelClient,
     tools: &ToolRegistry,
+    engine: &PermissionEngine,
+    approver: &dyn Approver,
     request: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -228,12 +246,91 @@ where
             });
         }
 
-        // 执行工具,结果入历史。
+        // 执行工具(先过权限判定),结果入历史。
         for (call_id, tool_name, input) in &tool_calls {
-            on_event(TurnEvent::ToolExecBegin {
-                call_id: call_id.clone(),
-            });
-            let output = exec_tool(tools, tool_name, input, cwd, cancel).await;
+            let tool_arc = tools.get(tool_name);
+            let key = tool_arc.as_ref().and_then(|t| t.permission_key(input, cwd));
+            let decision = engine.decide(tool_name, key.as_ref());
+            let rule_matched = match &decision.source {
+                VerdictSource::Rule { rule } => Some(rule.pattern.as_str()),
+                _ => None,
+            };
+
+            let output: Result<ToolOutput, ToolError> = match decision.verdict {
+                Verdict::Deny => {
+                    let msg = format!("被权限策略拒绝(工具: {tool_name})");
+                    on_event(TurnEvent::ToolExecEnd {
+                        call_id: call_id.clone(),
+                        ok: false,
+                        summary: "权限拒绝".into(),
+                    });
+                    messages.push(ModelMessage::ToolResult {
+                        call_id: call_id.clone(),
+                        content: vec![ModelContent::Text(msg)],
+                        is_error: true,
+                    });
+                    continue;
+                }
+                Verdict::Allow => {
+                    on_event(TurnEvent::ToolExecBegin {
+                        call_id: call_id.clone(),
+                    });
+                    exec_tool(tools, tool_name, input, cwd, cancel).await
+                }
+                Verdict::Ask => {
+                    let req =
+                        approval_request(call_id.clone(), tool_name, key.as_ref(), rule_matched);
+                    on_event(TurnEvent::ApprovalRequest {
+                        call_id: call_id.clone(),
+                        kind: req.kind,
+                        detail: req.detail.clone(),
+                    });
+                    let resp = approver.request(req).await;
+                    on_event(TurnEvent::ApprovalResolved {
+                        call_id: call_id.clone(),
+                        decision: resp,
+                    });
+                    match resp {
+                        ReviewDecision::Approve => {
+                            on_event(TurnEvent::ToolExecBegin {
+                                call_id: call_id.clone(),
+                            });
+                            exec_tool(tools, tool_name, input, cwd, cancel).await
+                        }
+                        ReviewDecision::ApproveForSession => {
+                            if let Some(k) = &key {
+                                engine.grant(tool_name, &k.pattern_string());
+                            }
+                            on_event(TurnEvent::ToolExecBegin {
+                                call_id: call_id.clone(),
+                            });
+                            exec_tool(tools, tool_name, input, cwd, cancel).await
+                        }
+                        ReviewDecision::Deny => {
+                            let msg = format!("用户拒绝执行(工具: {tool_name})");
+                            on_event(TurnEvent::ToolExecEnd {
+                                call_id: call_id.clone(),
+                                ok: false,
+                                summary: "用户拒绝".into(),
+                            });
+                            messages.push(ModelMessage::ToolResult {
+                                call_id: call_id.clone(),
+                                content: vec![ModelContent::Text(msg)],
+                                is_error: true,
+                            });
+                            continue;
+                        }
+                        ReviewDecision::Abort => {
+                            return Ok(TurnResult {
+                                stop_reason: StopReason::Interrupted,
+                                steps,
+                                messages: messages.clone(),
+                            });
+                        }
+                    }
+                }
+            };
+
             let (ok, summary, content, is_error) = match output {
                 Ok(o) => {
                     let ok = !o.is_error;

@@ -1,10 +1,12 @@
 //! TUI 主循环:tokio select! crossterm 事件 + TurnEvent 流 + tick。
 //! 见 docs/design/tui.md §2。
 
+use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{
@@ -14,14 +16,17 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tao_core::config::{Config, LoadOpts};
 use tao_core::model::{ModelContent, ModelMessage, ModelRequest, RequestMeta, SystemBlock};
+use tao_core::permissions::{ApprovalRequest, Approver, PermissionEngine};
 use tao_core::providers::ModelClient;
 use tao_core::providers::registry::resolve;
 use tao_core::session::{TurnConfig, TurnEvent, run_turn};
 use tao_core::tools::ToolRegistry;
-use tokio::sync::mpsc;
+use tao_protocol::op::ReviewDecision;
+use tao_protocol::permission::PermissionMode;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::render::{HistoryCell, RenderState};
+use crate::render::{HistoryCell, PendingApproval, RenderState};
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -29,6 +34,38 @@ pub struct TuiOpts {
     pub cwd: PathBuf,
     pub model: Option<String>,
     pub load_opts: LoadOpts,
+}
+
+/// TUI 审批器:通过 oneshot + HashMap 与主循环按 call_id 配对。
+/// `request()` 注册 oneshot 并 await;主循环按键后调 `respond()` 送回决定。
+struct TuiApprover {
+    pending: Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>,
+}
+
+impl TuiApprover {
+    fn new() -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 主循环按键后调用:把决定送回对应 `request()` 的 await。
+    fn respond(&self, call_id: &str, decision: ReviewDecision) {
+        if let Some(tx) = self.pending.lock().unwrap().remove(call_id) {
+            let _ = tx.send(decision);
+        }
+    }
+}
+
+#[async_trait]
+impl Approver for TuiApprover {
+    async fn request(&self, req: ApprovalRequest) -> ReviewDecision {
+        let (tx, rx) = oneshot::channel();
+        let key = req.call_id.to_string();
+        self.pending.lock().unwrap().insert(key, tx);
+        // 通道关闭(如 turn 被中断)→ 默认 Deny,安全侧。
+        rx.await.unwrap_or(ReviewDecision::Deny)
+    }
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -48,13 +85,17 @@ async fn run_with_opts(opts: TuiOpts) -> anyhow::Result<()> {
     let config = Config::load(&opts.load_opts)?;
     let (client, default_model) = resolve(&config).map_err(|e| anyhow::anyhow!("{e}"))?;
     let model = opts.model.unwrap_or(default_model);
+    let engine = Arc::new(PermissionEngine::new(
+        config.permission_mode,
+        config.permissions.rules.clone(),
+    ));
 
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = app_loop(&mut terminal, client, model, &opts.cwd).await;
+    let result = app_loop(&mut terminal, client, model, &opts.cwd, engine).await;
 
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
@@ -69,10 +110,12 @@ struct UiState {
     messages: Vec<ModelMessage>,
     running: bool,
     error: Option<String>,
+    mode: PermissionMode,
+    pending_approval: Option<PendingApproval>,
 }
 
 impl UiState {
-    fn new() -> Self {
+    fn new(mode: PermissionMode) -> Self {
         Self {
             input: String::new(),
             history: Vec::new(),
@@ -81,6 +124,8 @@ impl UiState {
             messages: Vec::new(),
             running: false,
             error: None,
+            mode,
+            pending_approval: None,
         }
     }
 }
@@ -90,8 +135,10 @@ async fn app_loop(
     client: Arc<dyn ModelClient>,
     model: String,
     cwd: &std::path::Path,
+    engine: Arc<PermissionEngine>,
 ) -> anyhow::Result<()> {
-    let mut state = UiState::new();
+    let mut state = UiState::new(engine.mode());
+    let approver = Arc::new(TuiApprover::new());
     let (turn_tx, mut turn_rx) = mpsc::unbounded_channel::<TurnEvent>();
 
     // 后台读 crossterm 事件(避免阻塞 tokio)。
@@ -125,12 +172,14 @@ async fn app_loop(
             running: state.running,
             error: state.error.as_deref(),
             model: &model,
+            mode: state.mode,
+            pending_approval: state.pending_approval.as_ref(),
         };
         terminal.draw(|f| crate::render::draw(f, &render_state))?;
 
         tokio::select! {
             Some(key) = key_rx.recv() => {
-                if handle_key(key, &mut state, &client, &tools, &system, &model, cwd, &turn_tx).await? {
+                if handle_key(key, &mut state, &client, &tools, &system, &model, cwd, &turn_tx, &engine, &approver).await? {
                     return Ok(());
                 }
             }
@@ -152,10 +201,39 @@ async fn handle_key(
     model: &str,
     cwd: &std::path::Path,
     turn_tx: &mpsc::UnboundedSender<TurnEvent>,
+    engine: &Arc<PermissionEngine>,
+    approver: &Arc<TuiApprover>,
 ) -> anyhow::Result<bool> {
+    // 审批弹窗优先处理按键(y/s/n/a)
+    if let Some(pending) = state.pending_approval.clone() {
+        let decision = match key.code {
+            KeyCode::Char('y') => Some(ReviewDecision::Approve),
+            KeyCode::Char('s') => Some(ReviewDecision::ApproveForSession),
+            KeyCode::Char('n') => Some(ReviewDecision::Deny),
+            KeyCode::Char('a') => Some(ReviewDecision::Abort),
+            _ => None,
+        };
+        if let Some(d) = decision {
+            approver.respond(pending.call_id.as_ref(), d);
+            state.pending_approval = None;
+        }
+        return Ok(false);
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL)
         | (KeyCode::Char('d'), KeyModifiers::CONTROL) => Ok(true),
+        // shift+tab 循环模式 default → plan → accept-edits → default(不含 bypass)
+        (KeyCode::BackTab, _) => {
+            state.mode = match state.mode {
+                PermissionMode::Default => PermissionMode::Plan,
+                PermissionMode::Plan => PermissionMode::AcceptEdits,
+                PermissionMode::AcceptEdits => PermissionMode::Default,
+                PermissionMode::Bypass => PermissionMode::Bypass,
+            };
+            engine.set_mode(state.mode);
+            Ok(false)
+        }
         (KeyCode::Enter, _) if !state.running => {
             let prompt = state.input.clone();
             if !prompt.is_empty() {
@@ -176,6 +254,8 @@ async fn handle_key(
                 let tx = turn_tx.clone();
                 let mut messages = state.messages.clone();
                 let cancel = CancellationToken::new();
+                let engine = engine.clone();
+                let approver = approver.clone();
 
                 tokio::spawn(async move {
                     let req = ModelRequest {
@@ -192,6 +272,8 @@ async fn handle_key(
                     let result = run_turn(
                         client.as_ref(),
                         &tools,
+                        &engine,
+                        &*approver,
                         &req,
                         &mut messages,
                         &config,
@@ -247,6 +329,22 @@ fn handle_turn_event(ev: TurnEvent, state: &mut UiState) {
             }
             state.history.push(HistoryCell::tool(&status));
             state.tool_status = Some((status, ok));
+        }
+        TurnEvent::ApprovalRequest {
+            call_id,
+            kind,
+            detail,
+        } => {
+            state.pending_approval = Some(PendingApproval {
+                call_id,
+                kind,
+                tool: detail.tool.unwrap_or_default(),
+                command: detail.command,
+                pattern_suggestion: detail.pattern_suggestion,
+            });
+        }
+        TurnEvent::ApprovalResolved { .. } => {
+            state.pending_approval = None;
         }
         TurnEvent::TurnComplete { .. } => {
             if !state.live_text.is_empty() {

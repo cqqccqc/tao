@@ -12,6 +12,7 @@ authors.workspace = true
 tao-core.workspace = true
 tao-protocol.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 ratatui.workspace = true

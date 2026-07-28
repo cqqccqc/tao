@@ -6,13 +6,41 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tao_core::config::{Config, LoadOpts};
 use tao_core::model::{ModelContent, ModelMessage, ModelRequest, RequestMeta, SystemBlock};
+use tao_core::permissions::{ApprovalRequest, Approver, PermissionEngine};
 use tao_core::providers::ModelClient;
 use tao_core::providers::registry::resolve;
 use tao_core::session::{TurnConfig, TurnEvent, run_turn};
 use tao_core::tools::ToolRegistry;
+use tao_protocol::op::ReviewDecision;
 use tokio_util::sync::CancellationToken;
+
+/// headless 模式下 Ask 审批的处理策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnAsk {
+    /// 拒绝(默认):模型收到"用户拒绝",通常换方案。保证脚本可预期。
+    #[default]
+    Deny,
+    /// 批准:等价自动 yes,仅用于受信任的自动化。
+    Approve,
+}
+
+/// headless 审批器:Ask 时按 on_ask 直接决策,无 IO。
+struct HeadlessApprover {
+    on_ask: OnAsk,
+}
+
+#[async_trait]
+impl Approver for HeadlessApprover {
+    async fn request(&self, _req: ApprovalRequest) -> ReviewDecision {
+        match self.on_ask {
+            OnAsk::Deny => ReviewDecision::Deny,
+            OnAsk::Approve => ReviewDecision::Approve,
+        }
+    }
+}
 
 /// exec 的运行选项。
 pub struct ExecOpts {
@@ -21,6 +49,7 @@ pub struct ExecOpts {
     /// 覆盖默认模型(从 config 推断)。
     pub model: Option<String>,
     pub json: bool,
+    pub on_ask: OnAsk,
     pub load_opts: LoadOpts,
 }
 
@@ -58,6 +87,10 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
         max_steps: config.max_turn_steps,
     };
     let cancel = CancellationToken::new();
+    let engine = PermissionEngine::new(config.permission_mode, config.permissions.rules.clone());
+    let approver = HeadlessApprover {
+        on_ask: opts.on_ask,
+    };
 
     let cancel2 = cancel.clone();
     tokio::spawn(async move {
@@ -71,6 +104,8 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
         run_json(
             client,
             &tools,
+            &engine,
+            &approver,
             &req,
             &mut messages,
             &config_turn,
@@ -82,6 +117,8 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
         run_text(
             client,
             &tools,
+            &engine,
+            &approver,
             &req,
             &mut messages,
             &config_turn,
@@ -92,9 +129,12 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_text(
     client: Arc<dyn ModelClient>,
     tools: &ToolRegistry,
+    engine: &PermissionEngine,
+    approver: &dyn Approver,
     req: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -109,6 +149,8 @@ async fn run_text(
     let result = run_turn(
         client.as_ref(),
         tools,
+        engine,
+        approver,
         req,
         messages,
         config,
@@ -130,6 +172,20 @@ async fn run_text(
                     let _ = writeln!(stdout, "[{mark} {summary}]");
                 }
             }
+            TurnEvent::ApprovalRequest { kind, detail, .. } => {
+                if is_tty {
+                    let tool = detail.tool.as_deref().unwrap_or("?");
+                    let _ = writeln!(stdout, "\n[审批请求 {:?}: {tool}]", kind);
+                    if let Some(cmd) = &detail.command {
+                        let _ = writeln!(stdout, "  命令: {}", cmd.join(" "));
+                    }
+                }
+            }
+            TurnEvent::ApprovalResolved { decision, .. } => {
+                if is_tty {
+                    let _ = writeln!(stdout, "  审批决定: {:?}", decision);
+                }
+            }
             TurnEvent::Error(msg) => {
                 let _ = writeln!(stdout, "\n[error: {msg}]");
             }
@@ -148,9 +204,12 @@ async fn run_text(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_json(
     client: Arc<dyn ModelClient>,
     tools: &ToolRegistry,
+    engine: &PermissionEngine,
+    approver: &dyn Approver,
     req: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -162,6 +221,8 @@ async fn run_json(
     let result = run_turn(
         client.as_ref(),
         tools,
+        engine,
+        approver,
         req,
         messages,
         config,
@@ -175,6 +236,8 @@ async fn run_json(
                 TurnEvent::ToolCallEnd { call_id } => json!({"type": "tool_call_end", "call_id": call_id.to_string()}),
                 TurnEvent::ToolExecBegin { call_id } => json!({"type": "tool_exec_begin", "call_id": call_id.to_string()}),
                 TurnEvent::ToolExecEnd { call_id, ok, summary } => json!({"type": "tool_exec_end", "call_id": call_id.to_string(), "ok": ok, "summary": summary}),
+                TurnEvent::ApprovalRequest { call_id, kind, detail } => json!({"type": "approval_request", "call_id": call_id.to_string(), "kind": format!("{:?}", kind), "tool": detail.tool}),
+                TurnEvent::ApprovalResolved { call_id, decision } => json!({"type": "approval_resolved", "call_id": call_id.to_string(), "decision": format!("{:?}", decision)}),
                 TurnEvent::ModelMessageEnd { stop_reason } => json!({"type": "model_message_end", "stop_reason": format!("{:?}", stop_reason)}),
                 TurnEvent::TurnComplete { stop_reason, steps } => json!({"type": "turn_complete", "stop_reason": format!("{:?}", stop_reason), "steps": steps}),
                 TurnEvent::Error(msg) => json!({"type": "error", "message": msg}),

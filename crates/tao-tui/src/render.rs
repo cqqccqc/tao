@@ -2,10 +2,13 @@
 //! 见 docs/design/tui.md §3。
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use tao_protocol::event::ApprovalKind;
+use tao_protocol::ids::CallId;
+use tao_protocol::permission::PermissionMode;
 
 /// 历史单元格(append-only;只有 live cell 可变——M1 用 live_text 代替)。
 #[derive(Debug, Clone)]
@@ -27,6 +30,16 @@ impl HistoryCell {
     }
 }
 
+/// 待审批的调用(渲染弹窗用)。
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    pub call_id: CallId,
+    pub kind: ApprovalKind,
+    pub tool: String,
+    pub command: Option<Vec<String>>,
+    pub pattern_suggestion: Option<String>,
+}
+
 /// 渲染所需的只读视图。
 pub struct RenderState<'a> {
     pub input: &'a str,
@@ -36,6 +49,8 @@ pub struct RenderState<'a> {
     pub running: bool,
     pub error: Option<&'a str>,
     pub model: &'a str,
+    pub mode: PermissionMode,
+    pub pending_approval: Option<&'a PendingApproval>,
 }
 
 pub fn draw(f: &mut Frame, state: &RenderState) {
@@ -110,10 +125,21 @@ pub fn draw(f: &mut Frame, state: &RenderState) {
     f.render_widget(history, chunks[0]);
 
     // ---- 状态行 ----
+    let mode_color = match state.mode {
+        PermissionMode::Bypass => Color::Red,
+        PermissionMode::Plan => Color::Magenta,
+        PermissionMode::AcceptEdits => Color::Green,
+        PermissionMode::Default => Color::Yellow,
+    };
     let status_parts: Vec<Span> = vec![
         Span::styled(
             format!(" {} ", state.model),
             Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(" │ "),
+        Span::styled(
+            format!(" {:?} ", state.mode),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" │ "),
         if state.running {
@@ -167,4 +193,80 @@ pub fn draw(f: &mut Frame, state: &RenderState) {
         );
         f.render_widget(Paragraph::new(err_line), err_area);
     }
+
+    // ---- 审批弹窗(覆盖最上层)----
+    if let Some(p) = state.pending_approval {
+        let area = centered_rect(64, 40, f.area());
+        let mut lines: Vec<Line> = vec![Line::from(vec![
+            Span::styled("工具: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(p.tool.as_str()),
+        ])];
+        if let Some(cmd) = &p.command {
+            lines.push(Line::from(vec![
+                Span::styled("命令: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(cmd.join(" ")),
+            ]));
+        }
+        if let Some(sug) = &p.pattern_suggestion {
+            lines.push(Line::from(vec![
+                Span::styled("建议规则: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(sug.as_str(), Style::default().fg(Color::Cyan)),
+            ]));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "y",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("=批准  "),
+            Span::styled(
+                "s",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("=本次+会话  "),
+            Span::styled(
+                "n",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("=拒绝  "),
+            Span::styled(
+                "a",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("=中止"),
+        ]));
+        let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(
+            Span::styled(
+                format!(" 审批请求 {:?} ", p.kind),
+                Style::default().fg(Color::Yellow),
+            ),
+        ));
+        f.render_widget(Clear, area);
+        f.render_widget(popup, area);
+    }
+}
+
+/// 居中弹窗区域(百分比宽/高)。
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }

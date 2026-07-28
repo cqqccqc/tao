@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod config;
 pub mod model;
+pub mod permissions;
 pub mod providers;
 pub mod session;
 pub mod tools;
@@ -16,6 +17,7 @@ pub use config::{
     SessionsConfig, WireApi,
 };
 pub use model::{ModelError, ModelRequest, ModelStreamEvent};
+pub use permissions::{ApprovalRequest, Approver, PermissionEngine, PermissionKey};
 pub use providers::ModelClient;
 pub use session::{TurnConfig, TurnEvent, TurnResult, run_turn};
 pub use tools::{Tool, ToolCtx, ToolError, ToolOutput, ToolRegistry};

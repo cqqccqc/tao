@@ -10,7 +10,7 @@ pub mod bash;
 pub mod fs;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -18,6 +18,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::model::ToolSpec;
+use crate::permissions::PermissionKey;
 
 /// 工具调用上下文。M2 起会扩展 permissions / event_sink / subagent_factory。
 pub struct ToolCtx {
@@ -91,6 +92,13 @@ pub trait Tool: Send + Sync {
 
     /// 执行工具。返回 `ToolOutput`(成功或失败都是输出)或 `ToolError`(基础设施级失败)。
     async fn call(&self, args: &Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError>;
+
+    /// 提取权限维度(供 `PermissionEngine` 判定)。
+    /// 默认 `None`:未知工具(如未实现的 MCP)走模式默认值。
+    /// builtin 工具各自覆盖:Bash 提取 command argv,Read/Write 提取 path。
+    fn permission_key(&self, _args: &Value, _cwd: &Path) -> Option<PermissionKey> {
+        None
+    }
 }
 
 /// 工具注册表:按名分发。

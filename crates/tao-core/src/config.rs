@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tao_protocol::permission::PermissionMode;
+use tao_protocol::permission::{PermissionMode, PermissionRule};
 
 /// wire 协议三选一。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +64,7 @@ pub struct Config {
     pub model_providers: HashMap<String, ModelProviderConfig>,
     pub profiles: HashMap<String, PartialConfig>,
     pub sessions: SessionsConfig,
+    pub permissions: PermissionsConfig,
 }
 
 impl Default for Config {
@@ -106,6 +107,7 @@ impl Default for Config {
             model_providers: providers,
             sessions: SessionsConfig::default(),
             profiles: HashMap::new(),
+            permissions: PermissionsConfig::default(),
         }
     }
 }
@@ -124,6 +126,14 @@ impl Default for SessionsConfig {
             max_session_mb: 50,
         }
     }
+}
+
+/// 权限规则配置(`[permissions]` 表)。
+/// 只放 `rules`;权限模式用顶层 `permission_mode`(向后兼容,已有完整加载链)。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PermissionsConfig {
+    pub rules: Vec<PermissionRule>,
 }
 
 /// profile 覆盖:任意顶层字段的可选版本。
@@ -295,6 +305,9 @@ impl Config {
                 self.sessions.max_session_mb = v;
             }
         }
+        if let Some(perm) = &p.permissions {
+            self.permissions.rules.extend(perm.rules.iter().cloned());
+        }
     }
 
     fn apply_partial(&mut self, p: &PartialConfig) {
@@ -411,6 +424,13 @@ struct PartialFileConfig {
     model_providers: HashMap<String, ModelProviderConfig>,
     profiles: HashMap<String, PartialConfig>,
     sessions: Option<PartialSessionsConfig>,
+    permissions: Option<PartialPermissionsConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct PartialPermissionsConfig {
+    rules: Vec<PermissionRule>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -527,5 +547,27 @@ mod tests {
             "https://api.deepseek.com"
         );
         assert_eq!(c.model_providers["deepseek"].wire_api, WireApi::OpenaiChat);
+    }
+
+    #[test]
+    fn permissions_rules_from_toml_and_merge() {
+        let user = r#"
+[[permissions.rules]]
+tool = "Bash"
+pattern = "cargo *"
+action = "allow"
+"#;
+        let project = r#"
+[[permissions.rules]]
+tool = "Edit|Patch"
+pattern = "src/generated/**"
+action = "deny"
+"#;
+        let mut c = Config::default();
+        c.merge_partial_file(&toml::from_str::<PartialFileConfig>(user).unwrap());
+        c.merge_partial_file(&toml::from_str::<PartialFileConfig>(project).unwrap());
+        assert_eq!(c.permissions.rules.len(), 2);
+        assert_eq!(c.permissions.rules[0].pattern, "cargo *");
+        assert_eq!(c.permissions.rules[1].tool, "Edit|Patch");
     }
 }

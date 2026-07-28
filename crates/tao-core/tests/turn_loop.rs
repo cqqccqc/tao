@@ -1,18 +1,22 @@
 //! turn loop 测试:用 MockModel 脚本化 ModelStreamEvent,验证循环逻辑。
 //! 见 docs/design/testing.md §2(MockModel 是 agent 测试的基石)。
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde_json::json;
-use tao_core::model::{ModelError, ModelRequest, ModelStreamEvent};
+use tao_core::model::{ModelError, ModelMessage, ModelRequest, ModelStreamEvent};
+use tao_core::permissions::{ApprovalRequest, Approver, PermissionEngine};
 use tao_core::providers::ModelClient;
 use tao_core::session::{TurnConfig, TurnEvent, run_turn};
 use tao_core::tools::ToolRegistry;
 use tao_protocol::content::StopReason;
 use tao_protocol::ids::CallId;
+use tao_protocol::op::ReviewDecision;
+use tao_protocol::permission::PermissionMode;
 use tokio_util::sync::CancellationToken;
 
 /// 脚本化的 MockModel:按顺序返回预设的"轮次",每轮是一个事件序列。
@@ -43,6 +47,41 @@ impl ModelClient for MockModel {
         drop(turns);
         let stream = futures::stream::iter(events.into_iter().map(Ok));
         Ok(Box::pin(stream))
+    }
+}
+
+/// 脚本化审批器:`always` 每次返回同一决定;`script` 按序消耗(耗尽默认 Deny)。
+struct MockApprover {
+    always: Option<ReviewDecision>,
+    script: Mutex<VecDeque<ReviewDecision>>,
+}
+
+impl MockApprover {
+    fn always(d: ReviewDecision) -> Self {
+        Self {
+            always: Some(d),
+            script: Mutex::new(VecDeque::new()),
+        }
+    }
+    fn script(ds: Vec<ReviewDecision>) -> Self {
+        Self {
+            always: None,
+            script: Mutex::new(ds.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl Approver for MockApprover {
+    async fn request(&self, _req: ApprovalRequest) -> ReviewDecision {
+        if let Some(d) = self.always {
+            return d;
+        }
+        self.script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(ReviewDecision::Deny)
     }
 }
 
@@ -87,10 +126,27 @@ fn collect_events(events: &[TurnEvent]) -> Vec<String> {
         .collect()
 }
 
+/// 默认跑:Bypass 模式(工具全放行,不打断基本逻辑)+ Approve 审批器(不应被调用)。
 async fn run_with(
     model: MockModel,
-    messages: &mut Vec<tao_core::model::ModelMessage>,
+    messages: &mut Vec<ModelMessage>,
     cancel: &CancellationToken,
+) -> (
+    Vec<TurnEvent>,
+    Result<tao_core::session::TurnResult, ModelError>,
+) {
+    let engine = PermissionEngine::new(PermissionMode::Bypass, vec![]);
+    let approver = MockApprover::always(ReviewDecision::Approve);
+    run_with_full(model, messages, cancel, &engine, &approver).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_with_full(
+    model: MockModel,
+    messages: &mut Vec<ModelMessage>,
+    cancel: &CancellationToken,
+    engine: &PermissionEngine,
+    approver: &dyn Approver,
 ) -> (
     Vec<TurnEvent>,
     Result<tao_core::session::TurnResult, ModelError>,
@@ -112,6 +168,8 @@ async fn run_with(
     let result = run_turn(
         &model,
         &tools,
+        engine,
+        approver,
         &req,
         messages,
         &config,
@@ -123,6 +181,12 @@ async fn run_with(
     let events = collected.lock().unwrap().clone();
     (events, result)
 }
+
+fn count(events: &[TurnEvent], f: impl Fn(&TurnEvent) -> bool) -> usize {
+    events.iter().filter(|e| f(e)).count()
+}
+
+// ---- 基本循环(Bypass 模式,工具全放行)----
 
 #[tokio::test]
 async fn text_only_turn() {
@@ -150,14 +214,16 @@ async fn tool_call_then_text() {
     assert_eq!(result.stop_reason, StopReason::EndTurn);
     assert_eq!(result.steps, 2);
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::ToolCallBegin { tool, .. } if tool == "Bash"))
+        count(&events, |e| matches!(
+            e,
+            TurnEvent::ToolCallBegin { tool, .. } if tool == "Bash"
+        )) == 1
     );
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::ToolExecEnd { ok: true, .. }))
+        count(&events, |e| matches!(
+            e,
+            TurnEvent::ToolExecEnd { ok: true, .. }
+        )) == 1
     );
     assert_eq!(collect_events(&events), vec!["all good"]);
     assert_eq!(messages.len(), 3);
@@ -175,11 +241,12 @@ async fn unknown_tool_produces_error_result() {
     let result = result.unwrap();
     assert_eq!(result.steps, 2);
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::ToolExecEnd { ok: false, .. }))
+        count(&events, |e| matches!(
+            e,
+            TurnEvent::ToolExecEnd { ok: false, .. }
+        )) == 1
     );
-    if let tao_core::model::ModelMessage::ToolResult { is_error, .. } = &messages[1] {
+    if let ModelMessage::ToolResult { is_error, .. } = &messages[1] {
         assert!(*is_error);
     } else {
         panic!("期望 ToolResult");
@@ -217,4 +284,179 @@ async fn cancellation_during_turn() {
     let (_events, result) = run_with(model, &mut messages, &cancel).await;
     let result = result.unwrap();
     assert_eq!(result.stop_reason, StopReason::Interrupted);
+}
+
+// ---- 权限审批矩阵(Default 模式:Bash=Ask)----
+
+#[tokio::test]
+async fn ask_approve_executes_tool() {
+    let model = MockModel::new(vec![
+        tool_turn("c1", "Bash", json!({"command": ["echo", "done"]})),
+        text_turn("ok", StopReason::EndTurn),
+    ]);
+    let engine = PermissionEngine::new(PermissionMode::Default, vec![]);
+    let approver = MockApprover::always(ReviewDecision::Approve);
+    let mut messages = vec![];
+    let cancel = CancellationToken::new();
+    let (events, result) = run_with_full(model, &mut messages, &cancel, &engine, &approver).await;
+    let result = result.unwrap();
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(
+        count(&events, |e| matches!(e, TurnEvent::ApprovalRequest { .. })),
+        1
+    );
+    assert_eq!(
+        count(&events, |e| matches!(
+            e,
+            TurnEvent::ApprovalResolved {
+                decision: ReviewDecision::Approve,
+                ..
+            }
+        )),
+        1
+    );
+    assert_eq!(
+        count(&events, |e| matches!(
+            e,
+            TurnEvent::ToolExecEnd { ok: true, .. }
+        )),
+        1
+    );
+}
+
+#[tokio::test]
+async fn ask_deny_returns_error_result() {
+    let model = MockModel::new(vec![
+        tool_turn("c1", "Bash", json!({"command": ["echo", "done"]})),
+        text_turn("switched approach", StopReason::EndTurn),
+    ]);
+    let engine = PermissionEngine::new(PermissionMode::Default, vec![]);
+    let approver = MockApprover::always(ReviewDecision::Deny);
+    let mut messages = vec![];
+    let cancel = CancellationToken::new();
+    let (events, result) = run_with_full(model, &mut messages, &cancel, &engine, &approver).await;
+    let result = result.unwrap();
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(
+        count(&events, |e| matches!(
+            e,
+            TurnEvent::ToolExecEnd { ok: false, .. }
+        )),
+        1
+    );
+    if let ModelMessage::ToolResult { is_error, .. } = &messages[1] {
+        assert!(*is_error);
+    } else {
+        panic!("期望 ToolResult");
+    }
+}
+
+#[tokio::test]
+async fn ask_abort_interrupts_turn() {
+    let model = MockModel::new(vec![tool_turn(
+        "c1",
+        "Bash",
+        json!({"command": ["echo", "done"]}),
+    )]);
+    let engine = PermissionEngine::new(PermissionMode::Default, vec![]);
+    let approver = MockApprover::always(ReviewDecision::Abort);
+    let mut messages = vec![];
+    let cancel = CancellationToken::new();
+    let (_events, result) = run_with_full(model, &mut messages, &cancel, &engine, &approver).await;
+    let result = result.unwrap();
+    assert_eq!(result.stop_reason, StopReason::Interrupted);
+}
+
+#[tokio::test]
+async fn plan_mode_denies_write_without_approval() {
+    let model = MockModel::new(vec![
+        tool_turn("c1", "Write", json!({"path": "x.txt", "content": "hi"})),
+        text_turn("cannot write in plan", StopReason::EndTurn),
+    ]);
+    let engine = PermissionEngine::new(PermissionMode::Plan, vec![]);
+    // Plan 模式 Write=deny,不走审批,approver 不应被调用
+    let approver = MockApprover::always(ReviewDecision::Approve);
+    let mut messages = vec![];
+    let cancel = CancellationToken::new();
+    let (events, result) = run_with_full(model, &mut messages, &cancel, &engine, &approver).await;
+    let result = result.unwrap();
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(
+        count(&events, |e| matches!(e, TurnEvent::ApprovalRequest { .. })),
+        0
+    );
+    assert_eq!(
+        count(&events, |e| matches!(
+            e,
+            TurnEvent::ToolExecEnd { ok: false, .. }
+        )),
+        1
+    );
+    if let ModelMessage::ToolResult { is_error, .. } = &messages[1] {
+        assert!(*is_error);
+    } else {
+        panic!("期望 ToolResult");
+    }
+}
+
+#[tokio::test]
+async fn approve_for_session_grants_subsequent() {
+    // 同一命令两次:第一次 Ask→ApproveForSession,第二次因会话 grant 直接 Allow(不再 Ask)
+    let model = MockModel::new(vec![
+        tool_turn("c1", "Bash", json!({"command": ["echo", "a"]})),
+        tool_turn("c2", "Bash", json!({"command": ["echo", "a"]})),
+        text_turn("done", StopReason::EndTurn),
+    ]);
+    let engine = PermissionEngine::new(PermissionMode::Default, vec![]);
+    let approver = MockApprover::script(vec![ReviewDecision::ApproveForSession]);
+    let mut messages = vec![];
+    let cancel = CancellationToken::new();
+    let (events, result) = run_with_full(model, &mut messages, &cancel, &engine, &approver).await;
+    let result = result.unwrap();
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(
+        count(&events, |e| matches!(e, TurnEvent::ApprovalRequest { .. })),
+        1
+    );
+    // 两次工具都成功执行
+    assert_eq!(
+        count(&events, |e| matches!(
+            e,
+            TurnEvent::ToolExecEnd { ok: true, .. }
+        )),
+        2
+    );
+}
+
+#[tokio::test]
+async fn allow_rule_skips_approval() {
+    // 规则 allow "echo *":Default 模式下 Bash echo 不再 Ask
+    let model = MockModel::new(vec![
+        tool_turn("c1", "Bash", json!({"command": ["echo", "done"]})),
+        text_turn("ok", StopReason::EndTurn),
+    ]);
+    let engine = PermissionEngine::new(
+        PermissionMode::Default,
+        vec![tao_protocol::permission::PermissionRule {
+            tool: "Bash".into(),
+            pattern: "echo *".into(),
+            action: tao_protocol::permission::RuleAction::Allow,
+        }],
+    );
+    let approver = MockApprover::always(ReviewDecision::Deny); // 不应被调用
+    let mut messages = vec![];
+    let cancel = CancellationToken::new();
+    let (events, result) = run_with_full(model, &mut messages, &cancel, &engine, &approver).await;
+    result.unwrap();
+    assert_eq!(
+        count(&events, |e| matches!(e, TurnEvent::ApprovalRequest { .. })),
+        0
+    );
+    assert_eq!(
+        count(&events, |e| matches!(
+            e,
+            TurnEvent::ToolExecEnd { ok: true, .. }
+        )),
+        1
+    );
 }

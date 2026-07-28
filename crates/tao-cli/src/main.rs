@@ -24,6 +24,10 @@ struct Cli {
     #[arg(long, global = true)]
     model: Option<String>,
 
+    /// 跳过所有权限审批(等价 yolo,permission_mode=bypass)。需显式声明。
+    #[arg(long, global = true)]
+    dangerously_bypass_permissions: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -39,6 +43,9 @@ enum Command {
         /// 以 JSONL 输出事件流。
         #[arg(long)]
         json: bool,
+        /// Ask 审批的处理策略:deny(默认)或 approve。
+        #[arg(long, value_name = "deny|approve", default_value = "deny")]
+        on_ask: String,
     },
     /// 协议模式:stdin/stdout 走 JSONL Op/Event。
     Proto,
@@ -105,9 +112,16 @@ fn parse_overrides(raw: &[String]) -> anyhow::Result<Vec<CliOverride>> {
 }
 
 fn build_load_opts(cli: &Cli) -> anyhow::Result<LoadOpts> {
+    let mut overrides = parse_overrides(&cli.overrides)?;
+    if cli.dangerously_bypass_permissions {
+        overrides.push(CliOverride {
+            key: "permission_mode".into(),
+            value: "bypass".into(),
+        });
+    }
     Ok(LoadOpts {
         profile: cli.profile.clone(),
-        overrides: parse_overrides(&cli.overrides)?,
+        overrides,
         ..Default::default()
     })
 }
@@ -118,12 +132,22 @@ async fn main() -> anyhow::Result<()> {
     let load_opts = build_load_opts(&cli)?;
     match cli.command.unwrap_or(Command::Tui) {
         Command::Tui => tao_tui::run_with_load_opts(load_opts).await,
-        Command::Exec { prompt, json } => {
+        Command::Exec {
+            prompt,
+            json,
+            on_ask,
+        } => {
+            let on_ask = match on_ask.as_str() {
+                "deny" => tao_exec::OnAsk::Deny,
+                "approve" => tao_exec::OnAsk::Approve,
+                other => anyhow::bail!("--on-ask 无效: {other}(可选: deny/approve)"),
+            };
             let opts = tao_exec::ExecOpts {
                 prompt,
                 cwd: std::env::current_dir()?,
                 model: cli.model.clone(),
                 json,
+                on_ask,
                 load_opts,
             };
             tao_exec::run(opts).await

@@ -239,9 +239,13 @@ async fn registry_builtin_tools() {
     assert!(names.contains(&"Bash"));
     assert!(names.contains(&"Read"));
     assert!(names.contains(&"Write"));
+    assert!(names.contains(&"Edit"));
+    assert!(names.contains(&"Patch"));
+    assert!(names.contains(&"Grep"));
+    assert!(names.contains(&"Glob"));
 
     let specs = reg.specs();
-    assert_eq!(specs.len(), 3);
+    assert_eq!(specs.len(), 7);
     assert!(specs.iter().all(|s| !s.schema.is_null()));
 }
 

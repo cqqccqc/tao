@@ -10,3 +10,7 @@ authors.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+similar.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

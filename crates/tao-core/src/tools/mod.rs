@@ -7,7 +7,11 @@
 //! - 工具调用前后经 hooks 与权限判定(M2 实现),本模块只定义接口。
 
 pub mod bash;
+pub mod edit;
 pub mod fs;
+pub mod glob;
+pub mod grep;
+pub mod patch;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -112,12 +116,16 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// 内置工具集(M1:Bash + Read + Write)。
+    /// 内置工具集(M2:Bash + Read + Write + Edit + Patch + Grep + Glob)。
     pub fn builtin() -> Self {
         let mut r = Self::new();
         r.register(Arc::new(bash::BashTool));
         r.register(Arc::new(fs::ReadTool));
         r.register(Arc::new(fs::WriteTool));
+        r.register(Arc::new(edit::EditTool));
+        r.register(Arc::new(patch::PatchTool));
+        r.register(Arc::new(grep::GrepTool));
+        r.register(Arc::new(glob::GlobTool));
         r
     }
 

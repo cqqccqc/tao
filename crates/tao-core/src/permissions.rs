@@ -236,7 +236,7 @@ enum ToolClass {
 fn tool_class(tool: &str) -> ToolClass {
     match tool {
         "Bash" => ToolClass::Exec,
-        "Read" => ToolClass::Read,
+        "Read" | "Grep" | "Glob" => ToolClass::Read,
         "Write" | "Edit" | "Patch" => ToolClass::Write,
         "WebFetch" => ToolClass::Net,
         _ => ToolClass::Other,
@@ -484,6 +484,14 @@ mod tests {
         // Default:read=allow, 其余=ask
         assert_eq!(
             mode_default(PermissionMode::Default, "Read"),
+            Verdict::Allow
+        );
+        assert_eq!(
+            mode_default(PermissionMode::Default, "Grep"),
+            Verdict::Allow
+        );
+        assert_eq!(
+            mode_default(PermissionMode::Default, "Glob"),
             Verdict::Allow
         );
         assert_eq!(mode_default(PermissionMode::Default, "Bash"), Verdict::Ask);

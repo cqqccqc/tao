@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 tao-core.workspace = true
+tao-mcp.workspace = true
 tao-protocol.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true

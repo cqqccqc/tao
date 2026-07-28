@@ -67,6 +67,7 @@ pub struct Config {
     pub sessions: SessionsConfig,
     pub permissions: PermissionsConfig,
     pub hooks: HooksConfig,
+    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 impl Default for Config {
@@ -111,6 +112,7 @@ impl Default for Config {
             profiles: HashMap::new(),
             permissions: PermissionsConfig::default(),
             hooks: HooksConfig::default(),
+            mcp_servers: HashMap::new(),
         }
     }
 }
@@ -127,6 +129,27 @@ impl Default for SessionsConfig {
         Self {
             keep_days: 30,
             max_session_mb: 50,
+        }
+    }
+}
+
+/// MCP server 配置(`[mcp_servers.<name>]`)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub startup_timeout_ms: u64,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            startup_timeout_ms: 10_000,
         }
     }
 }
@@ -346,6 +369,9 @@ impl Config {
         if let Some(h) = &p.hooks {
             self.hooks.merge(h);
         }
+        for (k, v) in &p.mcp_servers {
+            self.mcp_servers.insert(k.clone(), v.clone());
+        }
     }
 
     fn apply_partial(&mut self, p: &PartialConfig) {
@@ -464,6 +490,7 @@ struct PartialFileConfig {
     sessions: Option<PartialSessionsConfig>,
     permissions: Option<PartialPermissionsConfig>,
     hooks: Option<HooksConfig>,
+    mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -105,6 +105,9 @@ async fn run_with_opts(opts: TuiOpts) -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
+    let mut tools = ToolRegistry::builtin();
+    tao_mcp::load_mcp_tools(&mut tools, &config.mcp_servers).await;
+    let tools = Arc::new(tools);
     let recorder = Arc::new(recorder);
     let result = app_loop(
         &mut terminal,
@@ -114,6 +117,7 @@ async fn run_with_opts(opts: TuiOpts) -> anyhow::Result<()> {
         engine,
         recorder,
         config.hooks,
+        tools,
         session_id,
     )
     .await;
@@ -160,6 +164,7 @@ async fn app_loop(
     engine: Arc<PermissionEngine>,
     recorder: Arc<JsonlRecorder>,
     hooks: HooksConfig,
+    tools: Arc<ToolRegistry>,
     session_id: SessionId,
 ) -> anyhow::Result<()> {
     let mut state = UiState::new(engine.mode());
@@ -179,7 +184,6 @@ async fn app_loop(
         }
     });
 
-    let tools = Arc::new(ToolRegistry::builtin());
     let mut system: Vec<SystemBlock> = Vec::new();
     if let Some(instr) = tao_core::instructions::load(cwd) {
         system.push(SystemBlock {

@@ -66,7 +66,8 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
     let (client, model) = resolve(&config).map_err(|e| anyhow::anyhow!("{e}"))?;
     let model = opts.model.unwrap_or(model);
 
-    let tools = ToolRegistry::builtin();
+    let mut tools = ToolRegistry::builtin();
+    tao_mcp::load_mcp_tools(&mut tools, &config.mcp_servers).await;
     let mut system: Vec<SystemBlock> = Vec::new();
     if let Some(instr) = tao_core::instructions::load(&opts.cwd) {
         system.push(SystemBlock {

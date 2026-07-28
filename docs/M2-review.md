@@ -1,6 +1,6 @@
 # M2/M3 实现摘要(供 code review)
 
-> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`、M2-5 `c0adfcd`、M2-6 `e0bc0c1`、M3-1 `5cc0fe3`、M3-2 `3102b83`、M3-3 `509429b`。`cargo ci` 全绿。**M2 全部完成**,M3 进行中(slash/hooks/子agent)。
+> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`、M2-5 `c0adfcd`、M2-6 `e0bc0c1`、M3-1 `5cc0fe3`、M3-2 `3102b83`、M3-3 `509429b`、M3-4 `62eaee2`。`cargo ci` 全绿。**M2 全部完成**,M3 进行中(slash/hooks/子agent/MCP,剩 OAuth)。
 > 设计文档:`docs/design/{permissions,tools,config,sessions}.md`。本文是**实现层**摘要,对照代码 review 用。
 
 ---
@@ -172,6 +172,22 @@
 
 ---
 
+## M3-4 MCP 客户端(JSON-RPC over stdio)
+
+### `tao-mcp/src/client.rs`
+- `McpClient`:spawn MCP server(command/args)+ JSON-RPC 2.0 over stdio(initialize / tools/list / tools/call)。自实现(不引入 rmcp)。
+- `McpTool`(Tool trait):`mcp__server__tool`,schema 透传,`call` → `McpClient::call_tool`。同 server 多工具共享 `Arc<Mutex<McpClient>>`。
+- `load_mcp_tools`:遍历 config.mcp_servers,spawn + initialize + list_tools → 注册;失败 skip + warn。
+
+### 接入
+- `config.rs`:`McpServerConfig { command, args, env, startup_timeout_ms }` + `Config.mcp_servers` + `[mcp_servers]` 解析。
+- exec/tui `run()`:构造 ToolRegistry 后调 `load_mcp_tools`。
+
+### v1 简化
+- stdio only(HTTP 留后续);不 ToolSearch/预算折叠(全暴露);不重连(启动失败 skip);全启动时 initialize(不惰性)。
+
+---
+
 ## v1 简化 / TODO(留后续)
 
 | 项 | v1 现状 | TODO |
@@ -184,6 +200,7 @@
 | slash 命令 | 内置 /help /clear /mode /compact /sessions + markdown 模板 | /model /rewind /rollback /diff 等;exec slash;交互式参数 |
 | hooks | PreToolUse/PostToolUse/Stop/SessionStart/SessionEnd + 守门 | UserPromptSubmit/Notification/SubagentStop;Modify;并行;项目信任 |
 | 子 agent | Task 工具 + 独立会话 + 只读 | max_depth;BackgroundEvent 透传;/agent 显式;子权限可配 |
+| MCP 客户端 | JSON-RPC over stdio + mcp__server__tool | HTTP transport;ToolSearch/预算;重连;惰性启动 |
 | Edit 先 Read | 不强制(靠唯一性+diff) | `ToolCtx` 加 `read_files` 跟踪 |
 | Patch 寻址 | L1 文本 fuzz only | L2 tree-sitter AST 锚定 |
 | Grep fallback | 无 .gitignore(跳过常见目录) | rg 优先时无此问题;fallback 可加 ignore crate |

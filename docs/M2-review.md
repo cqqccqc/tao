@@ -1,6 +1,6 @@
 # M2/M3 实现摘要(供 code review)
 
-> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`、M2-5 `c0adfcd`、M2-6 `e0bc0c1`、M3-1 `5cc0fe3`、M3-2 `3102b83`。`cargo ci` 全绿。**M2 全部完成**,M3 进行中(slash 命令、hooks)。
+> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`、M2-4 `6829848`、M2-5 `c0adfcd`、M2-6 `e0bc0c1`、M3-1 `5cc0fe3`、M3-2 `3102b83`、M3-3 `509429b`。`cargo ci` 全绿。**M2 全部完成**,M3 进行中(slash/hooks/子agent)。
 > 设计文档:`docs/design/{permissions,tools,config,sessions}.md`。本文是**实现层**摘要,对照代码 review 用。
 
 ---
@@ -153,6 +153,25 @@
 
 ---
 
+## M3-3 子 agent(Task 工具)
+
+### `tao-core/src/agents.rs`
+- `SubagentDef { name, description, tools, model, system_prompt }`:frontmatter + body。
+- `load_agents(cwd)`:发现 `~/.tao/agents/` + `<cwd>/.tao/agents/`(项目优先)。
+
+### Task 工具(`tools/task.rs` + `session.rs`)
+- `TaskTool`:spec only(模型知道可调);`call` 返回 error(run_turn 拦截)。
+- `run_turn` 工具循环:`if tool_name == "Task"` → `exec_task`(spawn 子 run_turn:只读 Plan/fork recorder/NullApprover/max_steps 20/Box::pin 递归)→ 报告(子最后 Assistant text)。
+- `ToolRegistry::readonly_subset`:子 agent 只读工具子集(Read/Grep/Glob)。
+
+### 测试
+- agents 2 单测(load/frontmatter/default tools)。
+
+### v1 简化
+- 不递归(子只读无 Task);不透传 BackgroundEvent;`/agent` 显式留后续;子权限 Plan 只读。
+
+---
+
 ## v1 简化 / TODO(留后续)
 
 | 项 | v1 现状 | TODO |
@@ -164,6 +183,7 @@
 | markdown 渲染 | pulldown-cmark 基本元素+diff 着色 | syntect 高亮、主题、inline viewport、textwrap、行缓存 |
 | slash 命令 | 内置 /help /clear /mode /compact /sessions + markdown 模板 | /model /rewind /rollback /diff 等;exec slash;交互式参数 |
 | hooks | PreToolUse/PostToolUse/Stop/SessionStart/SessionEnd + 守门 | UserPromptSubmit/Notification/SubagentStop;Modify;并行;项目信任 |
+| 子 agent | Task 工具 + 独立会话 + 只读 | max_depth;BackgroundEvent 透传;/agent 显式;子权限可配 |
 | Edit 先 Read | 不强制(靠唯一性+diff) | `ToolCtx` 加 `read_files` 跟踪 |
 | Patch 寻址 | L1 文本 fuzz only | L2 tree-sitter AST 锚定 |
 | Grep fallback | 无 .gitignore(跳过常见目录) | rg 优先时无此问题;fallback 可加 ignore crate |

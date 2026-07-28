@@ -245,7 +245,7 @@ async fn registry_builtin_tools() {
     assert!(names.contains(&"Glob"));
 
     let specs = reg.specs();
-    assert_eq!(specs.len(), 7);
+    assert_eq!(specs.len(), 8);
     assert!(specs.iter().all(|s| !s.schema.is_null()));
 }
 

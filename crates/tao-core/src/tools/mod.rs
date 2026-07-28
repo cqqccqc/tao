@@ -12,6 +12,7 @@ pub mod fs;
 pub mod glob;
 pub mod grep;
 pub mod patch;
+pub mod task;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -126,6 +127,7 @@ impl ToolRegistry {
         r.register(Arc::new(patch::PatchTool));
         r.register(Arc::new(grep::GrepTool));
         r.register(Arc::new(glob::GlobTool));
+        r.register(Arc::new(task::TaskTool));
         r
     }
 
@@ -145,5 +147,18 @@ impl ToolRegistry {
 
     pub fn names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// 只读工具子集(子 agent 用):按 names 过滤,只保留 Read/Grep/Glob。
+    pub fn readonly_subset(&self, names: &[String]) -> Self {
+        let mut r = Self::new();
+        for name in names {
+            if matches!(name.as_str(), "Read" | "Grep" | "Glob")
+                && let Some(t) = self.tools.get(name)
+            {
+                r.register(t.clone());
+            }
+        }
+        r
     }
 }

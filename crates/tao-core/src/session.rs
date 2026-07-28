@@ -12,22 +12,26 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::Value;
 use tao_protocol::content::{Content, StopReason, TokenUsage};
 use tao_protocol::event::{ApprovalDetail, ApprovalKind};
-use tao_protocol::ids::{CallId, TurnId};
+use tao_protocol::ids::{CallId, SessionId, TurnId};
 use tao_protocol::log::LogEvent;
 use tao_protocol::op::ReviewDecision;
-use tao_protocol::permission::{Verdict, VerdictSource};
+use tao_protocol::permission::{PermissionMode, Verdict, VerdictSource};
 use tokio_util::sync::CancellationToken;
 
+use crate::agents::load_agents;
 use crate::config::HooksConfig;
 use crate::hooks::{HookCtx, HookEvent, HookOutcome, run_hooks};
-use crate::model::{ModelContent, ModelMessage, ModelRequest, ModelStreamEvent};
-use crate::permissions::{Approver, PermissionEngine, approval_request};
+use crate::model::{
+    ModelContent, ModelMessage, ModelRequest, ModelStreamEvent, RequestMeta, SystemBlock,
+};
+use crate::permissions::{ApprovalRequest, Approver, PermissionEngine, approval_request};
 use crate::providers::ModelClient;
-use crate::recorder::Recorder;
+use crate::recorder::{JsonlRecorder, Recorder};
 use crate::tools::{Tool, ToolCtx, ToolError, ToolOutput, ToolRegistry};
 
 /// turn loop 产出的流式事件(供 TUI / exec 消费)。
@@ -281,6 +285,41 @@ where
                 tool: tool_name.clone(),
                 args: input.clone(),
             });
+
+            // Task 工具:特殊处理(spawn 子 agent run_turn)
+            if tool_name == "Task" {
+                let output = exec_task(
+                    client,
+                    tools,
+                    hooks,
+                    request,
+                    cwd,
+                    cancel,
+                    &session_id_str,
+                    input,
+                )
+                .await;
+                let (ok, summary, content, is_error) = match output {
+                    Ok(o) => (!o.is_error, summarize(&o.content), o.content, o.is_error),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        (false, msg.clone(), format!("[子 agent 失败: {msg}]"), true)
+                    }
+                };
+                on_event(TurnEvent::ToolExecEnd {
+                    call_id: call_id.clone(),
+                    ok,
+                    summary,
+                });
+                messages.push(ModelMessage::ToolResult {
+                    call_id: call_id.clone(),
+                    content: vec![ModelContent::Text(content.clone())],
+                    is_error,
+                });
+                record_tool_result(recorder, call_id, &content, is_error, 0);
+                continue;
+            }
+
             let decision = engine.decide(tool_name, key.as_ref());
             let rule_matched = match &decision.source {
                 VerdictSource::Rule { rule } => Some(rule.pattern.as_str()),
@@ -463,6 +502,15 @@ struct ToolInputAccum {
     json_fragments: Vec<String>,
 }
 
+/// 子 agent 审批器:Plan 只读不触发审批,Deny 兜底(不应被调)。
+struct NullApprover;
+#[async_trait]
+impl Approver for NullApprover {
+    async fn request(&self, _req: ApprovalRequest) -> ReviewDecision {
+        ReviewDecision::Deny
+    }
+}
+
 async fn exec_tool(
     tools: &ToolRegistry,
     name: &str,
@@ -487,6 +535,87 @@ fn summarize(s: &str) -> String {
     } else {
         first_line.to_owned()
     }
+}
+
+/// Task 工具:spawn 子 agent run_turn,返回报告。
+#[allow(clippy::too_many_arguments)]
+async fn exec_task(
+    client: &dyn ModelClient,
+    tools: &ToolRegistry,
+    hooks: &HooksConfig,
+    request: &ModelRequest,
+    cwd: &Path,
+    cancel: &CancellationToken,
+    session_id: &str,
+    input: &Value,
+) -> Result<ToolOutput, ToolError> {
+    let subagent = input.get("subagent").and_then(|v| v.as_str()).unwrap_or("");
+    let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+    if subagent.is_empty() {
+        return Ok(ToolOutput::error("Task 缺少 subagent 参数"));
+    }
+    let agents = load_agents(cwd);
+    let def = match agents.iter().find(|a| a.name == subagent) {
+        Some(d) => d,
+        None => return Ok(ToolOutput::error(format!("未知子 agent: {subagent}"))),
+    };
+    let sub_tools = tools.readonly_subset(&def.tools);
+    let sub_engine = PermissionEngine::new(PermissionMode::Plan, vec![]);
+    let (sub_recorder, _sub_id) =
+        JsonlRecorder::create_fork(cwd, &SessionId::new(session_id.to_string()))
+            .map_err(|e| ToolError::Failed(format!("子会话创建失败: {e}")))?;
+    let sub_model = def.model.clone().unwrap_or_else(|| request.model.clone());
+    let sub_system = vec![SystemBlock {
+        text: def.system_prompt.clone(),
+        cache_breakpoint: None,
+    }];
+    let mut sub_messages = vec![ModelMessage::User {
+        content: vec![ModelContent::text(prompt)],
+    }];
+    let sub_req = ModelRequest {
+        model: sub_model,
+        system: sub_system,
+        messages: vec![],
+        tools: sub_tools.specs(),
+        reasoning: None,
+        max_output_tokens: 4096,
+        temperature: None,
+        metadata: RequestMeta::default(),
+    };
+    let sub_config = TurnConfig { max_steps: 20 };
+    let sub_result = Box::pin(run_turn(
+        client,
+        &sub_tools,
+        &sub_engine,
+        &NullApprover,
+        &sub_recorder,
+        hooks,
+        &sub_req,
+        &mut sub_messages,
+        &sub_config,
+        cwd,
+        cancel,
+        |_ev| {},
+    ))
+    .await;
+    let report = sub_messages
+        .iter()
+        .rev()
+        .find_map(|m| {
+            if let ModelMessage::Assistant { content } = m {
+                content.iter().find_map(|c| match c {
+                    ModelContent::Text(t) => Some(t.clone()),
+                    _ => None,
+                })
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| match sub_result {
+            Ok(r) => format!("[子 agent 无文本输出: {:?}]", r.stop_reason),
+            Err(e) => format!("[子 agent 错误: {e}]"),
+        });
+    Ok(ToolOutput::ok(report))
 }
 
 /// 记录 turn 边界(各 return 点前调)。

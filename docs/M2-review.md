@@ -1,0 +1,94 @@
+# M2 实现摘要(供 code review)
+
+> 对应 commit:M2-1 `77e1475`、M2-2 `1bf561c`、M2-3 `b7ce662`。`cargo ci` 全绿(fmt + clippy -D warnings + test)。
+> 设计文档:`docs/design/{permissions,tools,config,sessions}.md`。本文是**实现层**摘要,对照代码 review 用。
+
+---
+
+## M2-1 权限引擎 + 审批弹窗
+
+### 核心:`crates/tao-core/src/permissions.rs`
+- `PermissionEngine { mode, rules, session_grants }`——内部 `Mutex` 提供可变性,故 `decide`/`grant`/`set_mode` 只需 `&self`(便于 `Arc` 跨 turn/task 共享)。
+- `decide(tool, key) -> Decision` = `first_match(会话决策 → 规则引擎 → 模式默认值)`。
+- 规则匹配(`match_one`):`tool` 支持 `|` 多选;Bash 前缀 glob / Path glob(globset)/ Domain;`deny > ask > allow`(取 max),同 action 则 pattern 更长(更具体)优先。
+- 逃逸分析(`analyze_bash`,**v1 非安全边界**):`bash -lc` 拆 `&&`/`||`/`;`/`|` 多段聚合(最严:全 allow 才 allow);`$()`/反引号/`${` 不可解析 ⇒ 升级 Ask;`sudo`/`env`/`xargs`/`find -exec`/`git -c` 危险包装 ⇒ 升级 Ask。
+
+### 接入点
+- `Tool::permission_key(args, cwd) -> Option<PermissionKey>`(默认 None);`bash.rs` 提取 argv,`fs.rs` 的 Read/Write 提取 path。
+- `session.rs::run_turn` 签名加 `engine: &PermissionEngine` + `approver: &dyn Approver`;每个工具调用前判定:
+  - `Allow` → 执行;`Deny` → `ToolOutput::error("被权限策略拒绝")`;`Ask` → `approver.request().await`
+  - 审批响应:`Approve`/`ApproveForSession`(后者 `engine.grant`)→ 执行;`Deny` → error;`Abort` → `StopReason::Interrupted` 中断 turn
+- `Approver` trait(`async fn request(ApprovalRequest) -> ReviewDecision`):
+  - exec `HeadlessApprover`:按 `--on-ask`(默认 deny)直接决策
+  - tui `TuiApprover`:`oneshot` + `HashMap<call_id>` 配对;主循环收 `TurnEvent::ApprovalRequest` 渲染弹窗,按键 y/s/n/a 后 `respond()`
+- `TurnEvent` 加 `ApprovalRequest`/`ApprovalResolved`(exec 可输出,TUI 可渲染)
+- config:`[permissions]` rules(只放 rules,mode 用顶层 `permission_mode`);CLI `--dangerously-bypass-permissions`(设 bypass)+ exec `--on-ask <deny|approve>`
+- TUI:shift+tab 循环 default→plan→accept-edits(不含 bypass),状态栏显示模式
+
+### 测试
+- `permissions.rs` 18 单测:模式默认矩阵、deny>ask>allow、具体度优先、`|` 多选、Path/Domain glob、会话 grant 优先、bash -lc 拆分/不可解析/危险包装
+- `tests/turn_loop.rs` 审批矩阵 6 例:Ask→Approve 执行 / Ask→Deny error / Ask→Abort 中断 / Plan 拒写(不审批)/ ApproveForSession 二次免审 / allow 规则跳过
+
+---
+
+## M2-2 Edit/Patch/Grep/Glob
+
+### `tao-apply-patch`(引擎,`crates/tao-apply-patch/src/lib.rs`)
+- `parse(input) -> Vec<Hunk>`:DSL(`*** Begin/End Patch`、`*** Add/Update/Delete/Move File`、`@@ 锚`、`+`/`-`/` ` 行)→ Hunk,有错即拒。
+- `apply(hunks, base) -> String(diff)`:L1 文本 fuzz(归一化空白后滑动窗口匹配 `seek_context + remove`);多匹配⇒歧义拒绝,无匹配⇒拒绝;**事务性**(全部 hunk 寻址成功才写盘,临时文件 + rename);输出 similar unified diff。
+
+### 工具(`crates/tao-core/src/tools/`)
+- `edit.rs`:`old_string` 唯一性(除非 `replace_all`)+ similar diff;permission_key=Path
+- `patch.rs`:调 `parse`+`apply`;失败返回 `Ok(ToolOutput::error)`(模型可见,非 Err);permission_key=None(多文件,走 mode 默认)
+- `grep.rs`:rg 子进程优先(argv/超时/cancel/截断,复用 Bash 模式);rg 不在 PATH 时 `regex` + 递归遍历 fallback(跳过 .git/target/node_modules 等);permission_key=None
+- `glob.rs`:`glob` crate 遍历,mtime 倒序限 100;permission_key=None
+- `permissions::tool_class` 加 `Grep`/`Glob` → `Read`(否则会被归 Other 触发 Ask)
+- `ToolRegistry::builtin` 注册 7 工具
+
+### 测试
+- apply-patch 12 单测:解析 round-trip、Move、寻址(唯一/空白容忍/歧义拒绝/未找到)、Add/Delete/Move、事务性(中途失败不写盘)
+- 各工具单测(edit 唯一性/replace_all/diff、grep fallback、glob 模式)
+
+---
+
+## M2-3 AGENTS.md 指令文件
+
+### `crates/tao-core/src/instructions.rs`
+- `load(cwd) -> Option<String>`:发现 `~/.tao/AGENTS.md`(全局)+ `<cwd>/AGENTS.md`(项目),兼容 `CLAUDE.md`/`TAO.md`(`AGENTS.md` 优先);合并全局→项目(后写优先)。
+- exec/tui 构造 system 时前置 instructions `SystemBlock`(若 `Some`)。
+- 顺带:system prompt 工具列表补 Edit/Patch/Grep/Glob。
+
+### 测试
+- 4 单测:项目 AGENTS.md、fallback CLAUDE.md、AGENTS.md 优先于 CLAUDE.md、(全局+项目合并由代码 `join` 保证)
+
+---
+
+## v1 简化 / TODO(留后续)
+
+| 项 | v1 现状 | TODO |
+|---|---|---|
+| 逃逸分析 | 减少打扰,非安全边界 | M5 OS 沙箱(seatbelt/landlock) |
+| 会话授权 | 仅内存(`session_grants`) | resume 重放 `PermissionGrant`(依赖会话持久化) |
+| Edit 先 Read | 不强制(靠唯一性+diff) | `ToolCtx` 加 `read_files` 跟踪 |
+| Patch 寻址 | L1 文本 fuzz only | L2 tree-sitter AST 锚定 |
+| Grep fallback | 无 .gitignore(跳过常见目录) | rg 优先时无此问题;fallback 可加 ignore crate |
+| AGENTS.md | 全局+项目两级 | 向上找 repo 根、子目录惰性、`@path` 展开、fingerprint hash |
+
+---
+
+## 验证
+
+```bash
+cargo ci                                          # fmt + clippy -D warnings + test
+cargo test -p tao-apply-patch                     # patch 引擎 12 例
+cargo test -p tao-core --lib permissions          # 权限 18 例
+cargo test -p tao-core --test turn_loop           # 审批矩阵 + 回归
+
+# headless(default 模式 Bash 走审批;on-ask deny 拒绝)
+cargo run -p tao-cli --bin tao -- exec "列出当前目录文件"
+cargo run -p tao-cli --bin tao -- --dangerously-bypass-permissions exec "运行 echo hi"
+cargo run -p tao-cli --bin tao -- exec --on-ask approve "用 Grep 找 fn main"
+
+# TUI:shift+tab 切模式;工具触发审批弹窗 y/s/n/a
+cargo run -p tao-cli --bin tao --
+```

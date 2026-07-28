@@ -89,10 +89,10 @@ impl AgentHandle {
 | `session.rs` | 会话生命周期、turn loop 驱动、中断信号 |
 | `history.rs` | 规范模型消息史(内存视图,可 fold 重建) |
 | `providers/` | `ModelClient` trait + `anthropic.rs` / `openai_responses.rs` / `openai_chat.rs` 三个 wire codec |
-| `tools/` | `Tool` trait、`ToolRegistry`、内置工具实现 |
+| `tools/` | `Tool` trait、`ToolRegistry`;内置 Bash/Read/Write/Edit/Patch/Grep/Glob(M2) |
 | `tools/mcp.rs` | MCP server 连接管理、工具名映射 `mcp__server__tool` |
 | `exec.rs` | 子进程执行:流式输出、超时、cancel-on-drop、输出截断 |
-| `permissions.rs` | 权限模式 + 规则引擎 + 审批判定(纯函数) |
+| `permissions.rs` | 权限引擎(模式+规则+会话决策,纯函数 `decide`)+ `Approver` trait(审批 await,M2-1) |
 | `hooks.rs` | hook 触发点、进程执行、退出码语义 |
 | `subagent.rs` | 子 agent 构造与 Task 工具 |
 | `recorder.rs` | `LogEvent` append-only 落盘(JSONL,fsync 策略) |

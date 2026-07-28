@@ -78,7 +78,7 @@ pub enum ToolError {
 1. **解析层**:DSL → `Vec<Hunk>{action, path, seek_context, remove, add}`,纯文法,有错即拒。
 2. **寻址层(两级)**:
    - L1 文本 fuzz:在目标文件中滑动窗口匹配 `seek_context`(允许空白差异);
-   - L2 AST 锚定(tree-sitter):hunk 声明了 `@@ <symbol>` 时,先定位符号范围,再在范围内做 L1 匹配。L1 失败且文件可解析时自动尝试 L2;都失败则整个 patch 拒绝(事务性)。
+   - L2 AST 锚定(tree-sitter):hunk 声明了 `@@ <symbol>` 时,先定位符号范围,再在范围内做 L1 匹配。(**M2-2 v1 未实现 L2**,留后续;L1 失败即拒不猜测。事务性:全部 hunk 寻址成功才写盘,临时文件+rename。)
 3. **执行层**:全部 hunk 在内存中应用成功后才写盘(临时文件 + rename,原子);输出 `similar` 生成的 unified diff。
 
 ## 4. 命令执行(exec.rs)

@@ -53,6 +53,16 @@ request_max_retries = 4
 stream_max_retries = 3
 stream_idle_timeout_ms = 60_000
 
+# ---- 权限规则(见 permissions.md;mode 用顶层 permission_mode)----
+[[permissions.rules]]
+tool = "Bash"
+pattern = "cargo *"                     # 命令前缀 glob
+action = "allow"
+[[permissions.rules]]
+tool = "Edit|Patch"                     # | 多选
+pattern = "src/generated/**"            # 路径 glob
+action = "deny"
+
 # ---- MCP ----
 [mcp_servers.filesystem]
 command = "npx"

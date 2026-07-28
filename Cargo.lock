@@ -1645,6 +1645,16 @@ name = "tao-acp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tao-core",
+ "tao-mcp",
+ "tao-protocol",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -75,6 +75,12 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
             cache_breakpoint: None,
         });
     }
+    if let Some(p) = tao_core::skills::skills_prompt(&tao_core::skills::load_skills(&opts.cwd)) {
+        system.push(SystemBlock {
+            text: p,
+            cache_breakpoint: None,
+        });
+    }
     system.push(SystemBlock {
         text: "你是 tao,一个 Rust 编写的 coding agent。\
                你可以通过 Bash / Read / Write / Edit / Patch / Grep / Glob 工具帮助用户完成任务。\

@@ -16,6 +16,7 @@ pub mod providers;
 pub mod recorder;
 pub mod replay;
 pub mod session;
+pub mod skills;
 pub mod tools;
 
 pub use agent::{Agent, AgentHandle, SessionConfig};
@@ -33,4 +34,5 @@ pub use providers::ModelClient;
 pub use recorder::{JsonlRecorder, NullRecorder, Recorder};
 pub use replay::{SessionState, replay};
 pub use session::{TurnConfig, TurnEvent, TurnResult, run_turn};
+pub use skills::{SkillDef, load_skills, skills_prompt};
 pub use tools::{Tool, ToolCtx, ToolError, ToolOutput, ToolRegistry};

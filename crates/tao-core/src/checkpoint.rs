@@ -27,15 +27,22 @@ impl ShadowRepo {
             })
             .context("HOME 未设置")?;
 
-        if !git_dir.exists() {
-            std::fs::create_dir_all(&git_dir)?;
-            run_git(&git_dir, cwd, &["init", "--bare"])?;
-            let exclude = git_dir.join("info").join("exclude");
-            if let Some(parent) = exclude.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&exclude, ".env\n*.key\nsecrets.*\n*.pem\n")?;
+        std::fs::create_dir_all(&git_dir)?;
+        // git init --bare 直接指定路径(不用 --git-dir/--work-tree,init 不支持)
+        let output = Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&git_dir)
+            .output()
+            .context("git init --bare 失败")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git init --bare 失败: {}", stderr.trim());
         }
+        let exclude = git_dir.join("info").join("exclude");
+        if let Some(parent) = exclude.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&exclude, ".env\n*.key\nsecrets.*\n*.pem\n")?;
 
         Ok(Self {
             git_dir,

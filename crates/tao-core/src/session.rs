@@ -3,16 +3,21 @@
 //!
 //! 一个 turn = 从用户输入到模型停止调用工具的完整交互。
 //! 内部可能包含多轮"模型流 → 工具调用 → 工具结果 → 模型流"。
+//!
+//! `recorder` 在关键点记 `LogEvent` 落盘(见 docs/design/sessions.md §1);
+//! `UserInput`/`SessionMeta`/`ModeChange` 由调用方(exec/tui)在 run_turn 外记录。
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::StreamExt;
 use serde_json::Value;
-use tao_protocol::content::StopReason;
+use tao_protocol::content::{Content, StopReason, TokenUsage};
 use tao_protocol::event::{ApprovalDetail, ApprovalKind};
-use tao_protocol::ids::CallId;
+use tao_protocol::ids::{CallId, TurnId};
+use tao_protocol::log::LogEvent;
 use tao_protocol::op::ReviewDecision;
 use tao_protocol::permission::{Verdict, VerdictSource};
 use tokio_util::sync::CancellationToken;
@@ -20,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use crate::model::{ModelContent, ModelMessage, ModelRequest, ModelStreamEvent};
 use crate::permissions::{Approver, PermissionEngine, approval_request};
 use crate::providers::ModelClient;
+use crate::recorder::Recorder;
 use crate::tools::{Tool, ToolCtx, ToolError, ToolOutput, ToolRegistry};
 
 /// turn loop 产出的流式事件(供 TUI / exec 消费)。
@@ -84,17 +90,18 @@ impl Default for TurnConfig {
 
 /// 运行一个 turn。
 ///
-/// `messages` 是已有历史(可空);本函数会向其追加 user 输入、assistant 消息、
-/// tool_result 等,循环直到模型不再调用工具。
+/// `messages` 是已有历史(可空);本函数会向其追加 assistant 消息、tool_result 等,
+/// 循环直到模型不再调用工具。
 ///
-/// `engine` 做权限判定,`approver` 在 Ask 判定时等待前端应答。
-/// `on_event` 是同步回调(消费 TurnEvent);TUI/exec 各自实现。
+/// `engine` 做权限判定,`approver` 在 Ask 判定时等待前端应答,
+/// `recorder` 落盘 LogEvent。`on_event` 是同步回调(消费 TurnEvent)。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn<F>(
     client: &dyn ModelClient,
     tools: &ToolRegistry,
     engine: &PermissionEngine,
     approver: &dyn Approver,
+    recorder: &dyn Recorder,
     request: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -106,6 +113,7 @@ where
     F: FnMut(TurnEvent) + Send,
 {
     let mut steps: u32 = 0;
+    let turn_id = TurnId::new(request.metadata.turn_id.clone().unwrap_or_default());
 
     loop {
         steps += 1;
@@ -114,6 +122,7 @@ where
                 "max_steps({}) 超限",
                 config.max_steps
             )));
+            record_turn_boundary(recorder, &turn_id, StopReason::MaxSteps);
             return Ok(TurnResult {
                 stop_reason: StopReason::MaxSteps,
                 steps: steps - 1,
@@ -122,6 +131,7 @@ where
         }
 
         if cancel.is_cancelled() {
+            record_turn_boundary(recorder, &turn_id, StopReason::Interrupted);
             return Ok(TurnResult {
                 stop_reason: StopReason::Interrupted,
                 steps: steps - 1,
@@ -149,9 +159,11 @@ where
         let mut tool_inputs: HashMap<CallId, ToolInputAccum> = HashMap::new();
         let mut tool_order: Vec<CallId> = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
+        let mut last_usage = TokenUsage::default();
 
         while let Some(ev) = stream.next().await {
             if cancel.is_cancelled() {
+                record_turn_boundary(recorder, &turn_id, StopReason::Interrupted);
                 return Ok(TurnResult {
                     stop_reason: StopReason::Interrupted,
                     steps: steps - 1,
@@ -192,9 +204,11 @@ where
                     on_event(TurnEvent::ToolCallEnd { call_id });
                 }
                 ModelStreamEvent::MessageEnd {
-                    stop_reason: sr, ..
+                    stop_reason: sr,
+                    usage,
                 } => {
                     stop_reason = sr;
+                    last_usage = usage;
                     break;
                 }
             }
@@ -231,6 +245,12 @@ where
                 tool_calls.push((call_id.clone(), acc.name, input));
             }
         }
+        // 记录 assistant 消息(落盘)
+        recorder.record(LogEvent::AssistantMessage {
+            content: asst_content.iter().map(model_content_to_content).collect(),
+            usage: last_usage,
+            turn_id: turn_id.clone(),
+        });
         messages.push(ModelMessage::Assistant {
             content: asst_content,
         });
@@ -239,6 +259,7 @@ where
 
         // 无工具调用 → turn 结束。
         if tool_calls.is_empty() || stop_reason != StopReason::ToolUse {
+            record_turn_boundary(recorder, &turn_id, stop_reason);
             return Ok(TurnResult {
                 stop_reason,
                 steps,
@@ -250,12 +271,19 @@ where
         for (call_id, tool_name, input) in &tool_calls {
             let tool_arc = tools.get(tool_name);
             let key = tool_arc.as_ref().and_then(|t| t.permission_key(input, cwd));
+            // 记录工具调用意图(决策前)
+            recorder.record(LogEvent::ToolCall {
+                call_id: call_id.clone(),
+                tool: tool_name.clone(),
+                args: input.clone(),
+            });
             let decision = engine.decide(tool_name, key.as_ref());
             let rule_matched = match &decision.source {
                 VerdictSource::Rule { rule } => Some(rule.pattern.as_str()),
                 _ => None,
             };
 
+            let mut duration_ms: u64 = 0;
             let output: Result<ToolOutput, ToolError> = match decision.verdict {
                 Verdict::Deny => {
                     let msg = format!("被权限策略拒绝(工具: {tool_name})");
@@ -266,20 +294,25 @@ where
                     });
                     messages.push(ModelMessage::ToolResult {
                         call_id: call_id.clone(),
-                        content: vec![ModelContent::Text(msg)],
+                        content: vec![ModelContent::Text(msg.clone())],
                         is_error: true,
                     });
+                    record_tool_result(recorder, call_id, &msg, true, duration_ms);
                     continue;
                 }
                 Verdict::Allow => {
                     on_event(TurnEvent::ToolExecBegin {
                         call_id: call_id.clone(),
                     });
-                    exec_tool(tools, tool_name, input, cwd, cancel).await
+                    let start = Instant::now();
+                    let r = exec_tool(tools, tool_name, input, cwd, cancel).await;
+                    duration_ms = start.elapsed().as_millis() as u64;
+                    r
                 }
                 Verdict::Ask => {
                     let req =
                         approval_request(call_id.clone(), tool_name, key.as_ref(), rule_matched);
+                    let suggestion = req.detail.pattern_suggestion.clone();
                     on_event(TurnEvent::ApprovalRequest {
                         call_id: call_id.clone(),
                         kind: req.kind,
@@ -290,21 +323,37 @@ where
                         call_id: call_id.clone(),
                         decision: resp,
                     });
+                    recorder.record(LogEvent::Approval {
+                        call_id: call_id.clone(),
+                        verdict: resp,
+                        rule_suggestion: suggestion,
+                    });
                     match resp {
                         ReviewDecision::Approve => {
                             on_event(TurnEvent::ToolExecBegin {
                                 call_id: call_id.clone(),
                             });
-                            exec_tool(tools, tool_name, input, cwd, cancel).await
+                            let start = Instant::now();
+                            let r = exec_tool(tools, tool_name, input, cwd, cancel).await;
+                            duration_ms = start.elapsed().as_millis() as u64;
+                            r
                         }
                         ReviewDecision::ApproveForSession => {
                             if let Some(k) = &key {
-                                engine.grant(tool_name, &k.pattern_string());
+                                let pat = k.pattern_string();
+                                engine.grant(tool_name, &pat);
+                                recorder.record(LogEvent::PermissionGrant {
+                                    tool: tool_name.to_string(),
+                                    pattern: pat,
+                                });
                             }
                             on_event(TurnEvent::ToolExecBegin {
                                 call_id: call_id.clone(),
                             });
-                            exec_tool(tools, tool_name, input, cwd, cancel).await
+                            let start = Instant::now();
+                            let r = exec_tool(tools, tool_name, input, cwd, cancel).await;
+                            duration_ms = start.elapsed().as_millis() as u64;
+                            r
                         }
                         ReviewDecision::Deny => {
                             let msg = format!("用户拒绝执行(工具: {tool_name})");
@@ -315,12 +364,14 @@ where
                             });
                             messages.push(ModelMessage::ToolResult {
                                 call_id: call_id.clone(),
-                                content: vec![ModelContent::Text(msg)],
+                                content: vec![ModelContent::Text(msg.clone())],
                                 is_error: true,
                             });
+                            record_tool_result(recorder, call_id, &msg, true, duration_ms);
                             continue;
                         }
                         ReviewDecision::Abort => {
+                            record_turn_boundary(recorder, &turn_id, StopReason::Interrupted);
                             return Ok(TurnResult {
                                 stop_reason: StopReason::Interrupted,
                                 steps,
@@ -349,9 +400,10 @@ where
             });
             messages.push(ModelMessage::ToolResult {
                 call_id: call_id.clone(),
-                content: vec![ModelContent::Text(content)],
+                content: vec![ModelContent::Text(content.clone())],
                 is_error,
             });
+            record_tool_result(recorder, call_id, &content, is_error, duration_ms);
         }
         // 循环:带着工具结果再问模型。
     }
@@ -385,5 +437,52 @@ fn summarize(s: &str) -> String {
         format!("{first_line} ...")
     } else {
         first_line.to_owned()
+    }
+}
+
+/// 记录 turn 边界(各 return 点前调)。
+fn record_turn_boundary(recorder: &dyn Recorder, turn_id: &TurnId, stop_reason: StopReason) {
+    recorder.record(LogEvent::TurnBoundary {
+        turn_id: turn_id.clone(),
+        stop_reason,
+    });
+}
+
+/// 记录工具结果(output 约定为 {"content": <str>, "is_error": <bool>},replay 侧解析)。
+fn record_tool_result(
+    recorder: &dyn Recorder,
+    call_id: &CallId,
+    content: &str,
+    is_error: bool,
+    duration_ms: u64,
+) {
+    recorder.record(LogEvent::ToolResult {
+        call_id: call_id.clone(),
+        output: serde_json::json!({"content": content, "is_error": is_error}),
+        duration_ms,
+    });
+}
+
+/// ModelContent(core)→ Content(protocol),落盘用。
+fn model_content_to_content(mc: &ModelContent) -> Content {
+    match mc {
+        ModelContent::Text(t) => Content::Text { text: t.clone() },
+        ModelContent::Thinking { text, signature } => Content::Thinking {
+            text: text.clone(),
+            signature: signature.clone(),
+        },
+        ModelContent::ToolUse {
+            call_id,
+            name,
+            input,
+        } => Content::ToolUse {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            input: input.clone(),
+        },
+        ModelContent::Image { mime, data_base64 } => Content::Image {
+            mime: mime.clone(),
+            data_base64: data_base64.clone(),
+        },
     }
 }

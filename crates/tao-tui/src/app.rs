@@ -1,5 +1,8 @@
 //! TUI 主循环:tokio select! crossterm 事件 + TurnEvent 流 + tick。
 //! 见 docs/design/tui.md §2。
+//!
+//! v1:新会话落盘 JSONL(`JsonlRecorder::create`);tui 内 `--resume` 留 TODO
+//! (exec 已支持 resume;tui resume 需交互式重建 messages,后续)。
 
 use std::collections::HashMap;
 use std::io::{self, Stdout};
@@ -19,8 +22,12 @@ use tao_core::model::{ModelContent, ModelMessage, ModelRequest, RequestMeta, Sys
 use tao_core::permissions::{ApprovalRequest, Approver, PermissionEngine};
 use tao_core::providers::ModelClient;
 use tao_core::providers::registry::resolve;
+use tao_core::recorder::{JsonlRecorder, Recorder};
 use tao_core::session::{TurnConfig, TurnEvent, run_turn};
 use tao_core::tools::ToolRegistry;
+use tao_protocol::content::Content;
+use tao_protocol::ids::{SessionId, TurnId};
+use tao_protocol::log::LogEvent;
 use tao_protocol::op::ReviewDecision;
 use tao_protocol::permission::PermissionMode;
 use tokio::sync::{mpsc, oneshot};
@@ -89,13 +96,25 @@ async fn run_with_opts(opts: TuiOpts) -> anyhow::Result<()> {
         config.permission_mode,
         config.permissions.rules.clone(),
     ));
+    let (recorder, session_id) =
+        JsonlRecorder::create(&opts.cwd).map_err(|e| anyhow::anyhow!("创建会话日志失败: {e}"))?;
 
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = app_loop(&mut terminal, client, model, &opts.cwd, engine).await;
+    let recorder = Arc::new(recorder);
+    let result = app_loop(
+        &mut terminal,
+        client,
+        model,
+        &opts.cwd,
+        engine,
+        recorder,
+        session_id,
+    )
+    .await;
 
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
@@ -136,6 +155,8 @@ async fn app_loop(
     model: String,
     cwd: &std::path::Path,
     engine: Arc<PermissionEngine>,
+    recorder: Arc<JsonlRecorder>,
+    session_id: SessionId,
 ) -> anyhow::Result<()> {
     let mut state = UiState::new(engine.mode());
     let approver = Arc::new(TuiApprover::new());
@@ -186,7 +207,7 @@ async fn app_loop(
 
         tokio::select! {
             Some(key) = key_rx.recv() => {
-                if handle_key(key, &mut state, &client, &tools, &system, &model, cwd, &turn_tx, &engine, &approver).await? {
+                if handle_key(key, &mut state, &client, &tools, &system, &model, cwd, &turn_tx, &engine, &approver, &recorder, &session_id).await? {
                     return Ok(());
                 }
             }
@@ -210,6 +231,8 @@ async fn handle_key(
     turn_tx: &mpsc::UnboundedSender<TurnEvent>,
     engine: &Arc<PermissionEngine>,
     approver: &Arc<TuiApprover>,
+    recorder: &Arc<JsonlRecorder>,
+    session_id: &SessionId,
 ) -> anyhow::Result<bool> {
     // 审批弹窗优先处理按键(y/s/n/a)
     if let Some(pending) = state.pending_approval.clone() {
@@ -245,6 +268,11 @@ async fn handle_key(
             let prompt = state.input.clone();
             if !prompt.is_empty() {
                 state.input.clear();
+                let turn_id = TurnId::new(uuid::Uuid::new_v4().to_string());
+                recorder.record(LogEvent::UserInput {
+                    content: vec![Content::text(&prompt)],
+                    turn_id: turn_id.clone(),
+                });
                 state.history.push(HistoryCell::user(&prompt));
                 state.messages.push(ModelMessage::User {
                     content: vec![ModelContent::text(prompt)],
@@ -263,6 +291,8 @@ async fn handle_key(
                 let cancel = CancellationToken::new();
                 let engine = engine.clone();
                 let approver = approver.clone();
+                let recorder = recorder.clone();
+                let session_id = session_id.clone();
 
                 tokio::spawn(async move {
                     let req = ModelRequest {
@@ -273,7 +303,10 @@ async fn handle_key(
                         reasoning: None,
                         max_output_tokens: 4096,
                         temperature: None,
-                        metadata: RequestMeta::default(),
+                        metadata: RequestMeta {
+                            session_id: Some(session_id.as_ref().to_string()),
+                            turn_id: Some(turn_id.as_ref().to_string()),
+                        },
                     };
                     let config = TurnConfig::default();
                     let result = run_turn(
@@ -281,6 +314,7 @@ async fn handle_key(
                         &tools,
                         &engine,
                         &*approver,
+                        &*recorder,
                         &req,
                         &mut messages,
                         &config,

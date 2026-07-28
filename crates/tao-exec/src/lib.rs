@@ -1,7 +1,7 @@
 //! # tao-exec
 //!
-//! headless 单次执行:`tao exec "fix the tests"`。M1 实现。
-//! Ask 审批默认 deny(`--on-ask approve` 可改),保证脚本可预期。
+//! headless 单次执行:`tao exec "fix the tests"`。
+//! Ask 审批默认 deny(`--on-ask approve` 可改)。会话落盘 JSONL(`--resume`/`--fork`)。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,8 +12,13 @@ use tao_core::model::{ModelContent, ModelMessage, ModelRequest, RequestMeta, Sys
 use tao_core::permissions::{ApprovalRequest, Approver, PermissionEngine};
 use tao_core::providers::ModelClient;
 use tao_core::providers::registry::resolve;
+use tao_core::recorder::{JsonlRecorder, Recorder, session_file_path};
+use tao_core::replay::replay;
 use tao_core::session::{TurnConfig, TurnEvent, run_turn};
 use tao_core::tools::ToolRegistry;
+use tao_protocol::content::Content;
+use tao_protocol::ids::{SessionId, TurnId};
+use tao_protocol::log::LogEvent;
 use tao_protocol::op::ReviewDecision;
 use tokio_util::sync::CancellationToken;
 
@@ -50,6 +55,9 @@ pub struct ExecOpts {
     pub model: Option<String>,
     pub json: bool,
     pub on_ask: OnAsk,
+    /// resume 指定 session id;配合 `fork` 分叉新会话。
+    pub resume: Option<String>,
+    pub fork: bool,
     pub load_opts: LoadOpts,
 }
 
@@ -74,9 +82,46 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
         cache_breakpoint: None,
     });
 
-    let messages = vec![ModelMessage::User {
-        content: vec![ModelContent::text(opts.prompt.clone())],
-    }];
+    let cwd = opts.cwd.clone();
+
+    // 构造 recorder + messages + engine(新会话 / resume / fork)
+    let (recorder, mut messages, engine, session_id) = if let Some(id_str) = &opts.resume {
+        let parent_id = SessionId::new(id_str.clone());
+        let path = session_file_path(&cwd, &parent_id)
+            .ok_or_else(|| anyhow::anyhow!("无法定位会话日志(HOME 未设置)"))?;
+        let state = replay(&path).map_err(|e| anyhow::anyhow!("重放会话失败: {e}"))?;
+        let eng = PermissionEngine::new(state.mode, config.permissions.rules.clone());
+        for (t, p) in &state.session_grants {
+            eng.grant(t, p);
+        }
+        if opts.fork {
+            let (r, new_id) = JsonlRecorder::create_fork(&cwd, &parent_id)
+                .map_err(|e| anyhow::anyhow!("创建 fork 会话失败: {e}"))?;
+            (r, state.messages, eng, new_id)
+        } else {
+            let r = JsonlRecorder::open_existing(&parent_id, &cwd)
+                .map_err(|e| anyhow::anyhow!("打开会话失败: {e}"))?;
+            (r, state.messages, eng, parent_id)
+        }
+    } else {
+        let (r, id) =
+            JsonlRecorder::create(&cwd).map_err(|e| anyhow::anyhow!("创建会话失败: {e}"))?;
+        let eng = PermissionEngine::new(config.permission_mode, config.permissions.rules.clone());
+        (r, Vec::new(), eng, id)
+    };
+
+    if !opts.json {
+        eprintln!("[tao] session: {}", session_id.as_ref());
+    }
+
+    let turn_id = TurnId::new(uuid::Uuid::new_v4().to_string());
+    recorder.record(LogEvent::UserInput {
+        content: vec![Content::text(&opts.prompt)],
+        turn_id: turn_id.clone(),
+    });
+    messages.push(ModelMessage::User {
+        content: vec![ModelContent::text(&opts.prompt)],
+    });
 
     let req = ModelRequest {
         model,
@@ -86,15 +131,15 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
         reasoning: config.reasoning_effort,
         max_output_tokens: 4096,
         temperature: None,
-        metadata: RequestMeta::default(),
+        metadata: RequestMeta {
+            session_id: Some(session_id.as_ref().to_string()),
+            turn_id: Some(turn_id.as_ref().to_string()),
+        },
     };
-
-    let mut messages = messages;
     let config_turn = TurnConfig {
         max_steps: config.max_turn_steps,
     };
     let cancel = CancellationToken::new();
-    let engine = PermissionEngine::new(config.permission_mode, config.permissions.rules.clone());
     let approver = HeadlessApprover {
         on_ask: opts.on_ask,
     };
@@ -113,10 +158,11 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
             &tools,
             &engine,
             &approver,
+            &recorder,
             &req,
             &mut messages,
             &config_turn,
-            &opts.cwd,
+            &cwd,
             &cancel,
         )
         .await
@@ -126,10 +172,11 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
             &tools,
             &engine,
             &approver,
+            &recorder,
             &req,
             &mut messages,
             &config_turn,
-            &opts.cwd,
+            &cwd,
             &cancel,
         )
         .await
@@ -142,6 +189,7 @@ async fn run_text(
     tools: &ToolRegistry,
     engine: &PermissionEngine,
     approver: &dyn Approver,
+    recorder: &dyn Recorder,
     req: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -158,6 +206,7 @@ async fn run_text(
         tools,
         engine,
         approver,
+        recorder,
         req,
         messages,
         config,
@@ -217,6 +266,7 @@ async fn run_json(
     tools: &ToolRegistry,
     engine: &PermissionEngine,
     approver: &dyn Approver,
+    recorder: &dyn Recorder,
     req: &ModelRequest,
     messages: &mut Vec<ModelMessage>,
     config: &TurnConfig,
@@ -230,13 +280,14 @@ async fn run_json(
         tools,
         engine,
         approver,
+        recorder,
         req,
         messages,
         config,
         cwd,
         cancel,
         |ev| {
-            let json = match ev {
+            let j = match ev {
                 TurnEvent::TextDelta(t) => json!({"type": "text_delta", "text": t}),
                 TurnEvent::ThinkingDelta(t) => json!({"type": "thinking_delta", "text": t}),
                 TurnEvent::ToolCallBegin { call_id, tool } => json!({"type": "tool_call_begin", "call_id": call_id.to_string(), "tool": tool}),
@@ -249,7 +300,7 @@ async fn run_json(
                 TurnEvent::TurnComplete { stop_reason, steps } => json!({"type": "turn_complete", "stop_reason": format!("{:?}", stop_reason), "steps": steps}),
                 TurnEvent::Error(msg) => json!({"type": "error", "message": msg}),
             };
-            println!("{json}");
+            println!("{j}");
         },
     )
     .await?;

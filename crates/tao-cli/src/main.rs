@@ -28,6 +28,14 @@ struct Cli {
     #[arg(long, global = true)]
     dangerously_bypass_permissions: bool,
 
+    /// resume 指定 session id(exec 支持;tui 留后续)。
+    #[arg(long, global = true)]
+    resume: Option<String>,
+
+    /// 配合 --resume 分叉新会话(继承历史,parent 指向原 id)。
+    #[arg(long, global = true)]
+    fork: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -148,6 +156,8 @@ async fn main() -> anyhow::Result<()> {
                 model: cli.model.clone(),
                 json,
                 on_ask,
+                resume: cli.resume.clone(),
+                fork: cli.fork,
                 load_opts,
             };
             tao_exec::run(opts).await
@@ -159,8 +169,128 @@ async fn main() -> anyhow::Result<()> {
         Command::Login { .. } | Command::Logout { .. } | Command::Auth { .. } => Err(
             anyhow::anyhow!("auth 子命令将在 M3 实现,见 docs/design/config.md §3"),
         ),
-        Command::Sessions { .. } => Err(anyhow::anyhow!(
-            "sessions 子命令将在 M2/M4 实现,见 docs/design/sessions.md"
-        )),
+        Command::Sessions { action } => {
+            let cwd = std::env::current_dir()?;
+            match action {
+                SessionsAction::Ls => run_sessions_ls(&cwd),
+                SessionsAction::Audit { session_id } => run_sessions_audit(&cwd, &session_id),
+                SessionsAction::Gc => {
+                    let config = tao_core::config::Config::load(&load_opts)?;
+                    run_sessions_gc(&cwd, config.sessions.keep_days)
+                }
+            }
+        }
     }
+}
+
+// ---- sessions 子命令实现(v1:扫描 JSONL)----
+
+fn run_sessions_ls(cwd: &std::path::Path) -> anyhow::Result<()> {
+    let dir = tao_core::recorder::session_dir(cwd)
+        .ok_or_else(|| anyhow::anyhow!("HOME 未设置,无法定位会话目录"))?;
+    if !dir.exists() {
+        println!("(无会话)");
+        return Ok(());
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .collect();
+    entries.sort_by_key(|e| {
+        std::cmp::Reverse(
+            e.metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()),
+        )
+    });
+    if entries.is_empty() {
+        println!("(无会话)");
+        return Ok(());
+    }
+    println!("{:<36} {:>10}  MODIFIED(s)", "SESSION_ID", "SIZE");
+    for e in entries {
+        let path = e.path();
+        let id = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let meta = e.metadata().ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        println!("{id:<36} {size:>10}  {mtime}");
+    }
+    Ok(())
+}
+
+fn run_sessions_audit(cwd: &std::path::Path, id: &str) -> anyhow::Result<()> {
+    let sid = tao_protocol::ids::SessionId::new(id.to_string());
+    let path = tao_core::recorder::session_file_path(cwd, &sid)
+        .ok_or_else(|| anyhow::anyhow!("HOME 未设置,无法定位会话日志"))?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("读取 {} 失败: {e}", path.display()))?;
+    for line in content.lines() {
+        let ll: tao_protocol::log::LogLine = match serde_json::from_str(line) {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        match ll.event {
+            tao_protocol::log::LogEvent::PermissionDecision { tool, decision } => {
+                println!(
+                    "[seq {}] 判定 {tool}: {:?} 来源 {:?}",
+                    ll.seq, decision.verdict, decision.source
+                );
+            }
+            tao_protocol::log::LogEvent::Approval {
+                call_id,
+                verdict,
+                rule_suggestion,
+            } => {
+                println!(
+                    "[seq {}] 审批 {} → {:?} {}",
+                    ll.seq,
+                    call_id,
+                    verdict,
+                    rule_suggestion.unwrap_or_default()
+                );
+            }
+            tao_protocol::log::LogEvent::PermissionGrant { tool, pattern } => {
+                println!("[seq {}] 会话授权 {tool}: {pattern}", ll.seq);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn run_sessions_gc(cwd: &std::path::Path, keep_days: u32) -> anyhow::Result<()> {
+    let dir = tao_core::recorder::session_dir(cwd)
+        .ok_or_else(|| anyhow::anyhow!("HOME 未设置,无法定位会话目录"))?;
+    if !dir.exists() {
+        return Ok(());
+    }
+    let cutoff =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(keep_days as u64 * 86400);
+    let mut removed = 0;
+    for e in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
+        let path = e.path();
+        if path.extension().is_some_and(|x| x == "jsonl")
+            && let Ok(meta) = e.metadata()
+            && let Ok(mtime) = meta.modified()
+            && mtime < cutoff
+            && std::fs::remove_file(&path).is_ok()
+        {
+            println!("删除 {}", path.display());
+            removed += 1;
+        }
+    }
+    println!("清理完成,删除 {removed} 个会话");
+    Ok(())
 }

@@ -9,6 +9,8 @@ pub mod instructions;
 pub mod model;
 pub mod permissions;
 pub mod providers;
+pub mod recorder;
+pub mod replay;
 pub mod session;
 pub mod tools;
 
@@ -20,5 +22,7 @@ pub use config::{
 pub use model::{ModelError, ModelRequest, ModelStreamEvent};
 pub use permissions::{ApprovalRequest, Approver, PermissionEngine, PermissionKey};
 pub use providers::ModelClient;
+pub use recorder::{JsonlRecorder, NullRecorder, Recorder};
+pub use replay::{SessionState, replay};
 pub use session::{TurnConfig, TurnEvent, TurnResult, run_turn};
 pub use tools::{Tool, ToolCtx, ToolError, ToolOutput, ToolRegistry};

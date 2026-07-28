@@ -1651,10 +1651,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde_json",
  "tao-acp",
  "tao-core",
  "tao-exec",
  "tao-mcp",
+ "tao-protocol",
  "tao-server",
  "tao-tui",
  "tokio",
@@ -1700,6 +1702,7 @@ dependencies = [
  "tao-protocol",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]
@@ -1738,6 +1741,7 @@ dependencies = [
  "tao-protocol",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]

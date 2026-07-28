@@ -100,6 +100,8 @@ enum SessionsAction {
     Ls,
     /// 预览会话内容(meta + 消息摘要)。
     Show { session_id: String },
+    /// 导出净化版 transcript(markdown)。
+    Share { session_id: String },
     /// 输出会话的权限审计轨迹。
     Audit { session_id: String },
     /// 按保留策略清理旧会话。
@@ -176,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
             match action {
                 SessionsAction::Ls => run_sessions_ls(&cwd),
                 SessionsAction::Show { session_id } => run_sessions_show(&cwd, &session_id),
+                SessionsAction::Share { session_id } => run_sessions_share(&cwd, &session_id),
                 SessionsAction::Audit { session_id } => run_sessions_audit(&cwd, &session_id),
                 SessionsAction::Gc => {
                     let config = tao_core::config::Config::load(&load_opts)?;
@@ -369,6 +372,135 @@ fn run_sessions_show(cwd: &std::path::Path, id: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn run_sessions_share(cwd: &std::path::Path, id: &str) -> anyhow::Result<()> {
+    let sid = tao_protocol::ids::SessionId::new(id.to_string());
+    let path = tao_core::recorder::session_file_path(cwd, &sid)
+        .ok_or_else(|| anyhow::anyhow!("HOME 未设置,无法定位会话日志"))?;
+    let state =
+        tao_core::replay::replay(&path).map_err(|e| anyhow::anyhow!("读取会话失败: {e}"))?;
+
+    let title = state.title.as_deref().unwrap_or_else(|| {
+        state
+            .messages
+            .iter()
+            .find_map(|m| match m {
+                tao_core::model::ModelMessage::User { content } => content.iter().find_map(|c| {
+                    if let tao_core::model::ModelContent::Text(t) = c {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            })
+            .unwrap_or("(无标题)")
+    });
+
+    println!("# tao session: {title}");
+    println!();
+    println!("- **session_id**: {}", state.id.as_ref());
+    println!(
+        "- **parent**: {}",
+        state
+            .parent
+            .as_ref()
+            .map(|p| p.as_ref().to_string())
+            .unwrap_or_else(|| "(根)".into())
+    );
+    println!("- **cwd**: {}", state.cwd.display());
+    println!("- **messages**: {}", state.messages.len());
+    println!();
+    println!("---");
+    println!();
+
+    for msg in &state.messages {
+        match msg {
+            tao_core::model::ModelMessage::User { content } => {
+                let text: String = content
+                    .iter()
+                    .filter_map(|c| {
+                        if let tao_core::model::ModelContent::Text(t) = c {
+                            Some(t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!("## 用户");
+                println!();
+                println!("{}", redact_secrets(&text));
+                println!();
+            }
+            tao_core::model::ModelMessage::Assistant { content, .. } => {
+                let text: String = content
+                    .iter()
+                    .filter_map(|c| {
+                        if let tao_core::model::ModelContent::Text(t) = c {
+                            Some(t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !text.is_empty() {
+                    println!("## 助手");
+                    println!();
+                    println!("{}", redact_secrets(&text));
+                    println!();
+                }
+            }
+            tao_core::model::ModelMessage::ToolResult {
+                content, is_error, ..
+            } => {
+                let text: String = content
+                    .iter()
+                    .filter_map(|c| {
+                        if let tao_core::model::ModelContent::Text(t) = c {
+                            Some(t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let trunc = if text.len() > 200 {
+                    format!("{}...\n[truncated]", &text[..200])
+                } else {
+                    text
+                };
+                let mark = if *is_error { "✗" } else { "✓" };
+                println!("> **工具结果 [{mark}]**");
+                println!(">");
+                println!("> {}", redact_secrets(&trunc).replace('\n', "\n> "));
+                println!();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn redact_secrets(text: &str) -> String {
+    use regex::Regex;
+    let mut s = text.to_string();
+    let patterns: &[(&str, &str)] = &[
+        (r"sk-[a-zA-Z0-9_-]+", "sk-***"),
+        (r"Bearer [a-zA-Z0-9._-]+", "Bearer ***"),
+        (
+            r"(?i)(password|token|api_key|secret|apikey)[=:]\s*\S+",
+            "$1=***",
+        ),
+    ];
+    for (pat, repl) in patterns {
+        if let Ok(re) = Regex::new(pat) {
+            s = re.replace_all(&s, *repl).to_string();
+        }
+    }
+    s
 }
 
 fn run_sessions_audit(cwd: &std::path::Path, id: &str) -> anyhow::Result<()> {

@@ -1672,6 +1672,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "regex",
  "serde_json",
  "tao-acp",
  "tao-core",

@@ -22,5 +22,6 @@ tao-mcp = { path = "../tao-mcp" }
 tao-acp = { path = "../tao-acp" }
 clap.workspace = true
 anyhow.workspace = true
+regex.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

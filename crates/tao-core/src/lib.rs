@@ -4,6 +4,7 @@
 //! M1 起依次落地:providers(模型 codec)→ tools → turn loop → 权限 → 日志。
 
 pub mod agent;
+pub mod commands;
 pub mod compact;
 pub mod config;
 pub mod instructions;
@@ -16,6 +17,7 @@ pub mod session;
 pub mod tools;
 
 pub use agent::{Agent, AgentHandle, SessionConfig};
+pub use commands::{Builtin, CommandDef, expand, load_commands, parse_builtin, split_name_args};
 pub use compact::{DEFAULT_CONTEXT_WINDOW, DEFAULT_KEEP_LAST, approx_tokens, compact};
 pub use config::{
     AnthropicAuth, CliOverride, Config, LoadOpts, ModelProviderConfig, PartialConfig,

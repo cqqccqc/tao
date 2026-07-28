@@ -147,14 +147,10 @@ fn resolve_anthropic_provider() {
     unsafe {
         std::env::set_var("ANTHROPIC_API_KEY", "sk-test-key");
     }
-    let config = Config::load(&LoadOpts {
-        overrides: vec![CliOverride {
-            key: "model".into(),
-            value: "anthropic/claude-sonnet-4-6".into(),
-        }],
-        ..Default::default()
-    })
-    .unwrap();
+    let config = Config {
+        model: Some("anthropic/claude-sonnet-4-6".into()),
+        ..Config::default()
+    };
 
     match resolve(&config) {
         Ok((_client, model)) => assert_eq!(model, "claude-sonnet-4-6"),
@@ -233,14 +229,10 @@ env_key = "NONEXISTENT_KEY_FOR_TEST"
 
 #[test]
 fn resolve_unknown_provider_errors() {
-    let config = Config::load(&LoadOpts {
-        overrides: vec![CliOverride {
-            key: "model".into(),
-            value: "unknown-provider/some-model".into(),
-        }],
-        ..Default::default()
-    })
-    .unwrap();
+    let config = Config {
+        model: Some("unknown-provider/some-model".into()),
+        ..Config::default()
+    };
 
     match resolve(&config) {
         Ok(_) => panic!("应报 Build 错误"),

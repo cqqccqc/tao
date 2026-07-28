@@ -268,14 +268,96 @@ async fn handle_key(
             let prompt = state.input.clone();
             if !prompt.is_empty() {
                 state.input.clear();
+
+                // slash 命令(内置)
+                if prompt.starts_with('/')
+                    && let Some(builtin) = tao_core::commands::parse_builtin(&prompt)
+                {
+                    match builtin {
+                        tao_core::commands::Builtin::Help => {
+                            let cmds = tao_core::commands::load_commands(cwd);
+                            let mut msg = String::from(
+                                "内置:/help /clear /mode [default|plan|accept-edits] /compact /sessions\n",
+                            );
+                            if !cmds.is_empty() {
+                                msg.push_str("自定义:");
+                                for c in &cmds {
+                                    msg.push_str(&format!("\n  /{}: {}", c.name, c.description));
+                                }
+                            }
+                            state.history.push(HistoryCell::tool(&msg));
+                        }
+                        tao_core::commands::Builtin::Clear => {
+                            state.history.clear();
+                            state.messages.clear();
+                            state.error = None;
+                        }
+                        tao_core::commands::Builtin::Mode(m) => {
+                            state.mode = m;
+                            engine.set_mode(m);
+                        }
+                        tao_core::commands::Builtin::ModeCycle => {
+                            state.mode = match state.mode {
+                                PermissionMode::Default => PermissionMode::Plan,
+                                PermissionMode::Plan => PermissionMode::AcceptEdits,
+                                PermissionMode::AcceptEdits => PermissionMode::Default,
+                                PermissionMode::Bypass => PermissionMode::Bypass,
+                            };
+                            engine.set_mode(state.mode);
+                        }
+                        tao_core::commands::Builtin::Sessions => {
+                            let msg = match tao_core::recorder::session_dir(cwd) {
+                                Some(dir) => list_sessions(&dir),
+                                None => "HOME 未设置,无法定位会话".into(),
+                            };
+                            state.history.push(HistoryCell::tool(&msg));
+                        }
+                        tao_core::commands::Builtin::Compact => {
+                            state.running = true;
+                            match tao_core::compact::compact(
+                                client.as_ref(),
+                                model,
+                                &state.messages,
+                                tao_core::DEFAULT_KEEP_LAST,
+                                &**recorder,
+                            )
+                            .await
+                            {
+                                Ok(m) => {
+                                    state.messages = m;
+                                    state.history.push(HistoryCell::tool("已压缩上下文"));
+                                }
+                                Err(e) => state.error = Some(format!("压缩失败: {e}")),
+                            }
+                            state.running = false;
+                        }
+                    }
+                    return Ok(false);
+                }
+
+                // user 消息文本(slash markdown 模板展开 or 普通 prompt)
+                let user_text = if prompt.starts_with('/') {
+                    let (name, args) = tao_core::commands::split_name_args(&prompt);
+                    let cmds = tao_core::commands::load_commands(cwd);
+                    match cmds.iter().find(|c| c.name == name) {
+                        Some(cmd) => tao_core::commands::expand(&cmd.body, &args, cwd),
+                        None => {
+                            state.error = Some(format!("未知命令: {prompt}"));
+                            return Ok(false);
+                        }
+                    }
+                } else {
+                    prompt
+                };
+
                 let turn_id = TurnId::new(uuid::Uuid::new_v4().to_string());
                 recorder.record(LogEvent::UserInput {
-                    content: vec![Content::text(&prompt)],
+                    content: vec![Content::text(&user_text)],
                     turn_id: turn_id.clone(),
                 });
-                state.history.push(HistoryCell::user(&prompt));
+                state.history.push(HistoryCell::user(&user_text));
                 state.messages.push(ModelMessage::User {
-                    content: vec![ModelContent::text(prompt)],
+                    content: vec![ModelContent::text(user_text)],
                 });
                 state.running = true;
                 state.live_text.clear();
@@ -402,4 +484,33 @@ fn handle_turn_event(ev: TurnEvent, state: &mut UiState) {
         }
         _ => {}
     }
+}
+
+/// 列会话目录(TUI `/sessions` 用)。
+fn list_sessions(dir: &std::path::Path) -> String {
+    if !dir.exists() {
+        return "(无会话)".into();
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .collect();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok())));
+    if entries.is_empty() {
+        return "(无会话)".into();
+    }
+    let mut s = String::new();
+    for e in entries {
+        let id = e
+            .path()
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+        s.push_str(&format!("{id}  {size}B\n"));
+    }
+    s
 }

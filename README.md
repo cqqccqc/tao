@@ -10,6 +10,7 @@ A Rust coding agent built around a universal harness core and one wire-stable pr
 
 [![CI](https://github.com/cqqccqc/tao/actions/workflows/ci.yml/badge.svg)](https://github.com/cqqccqc/tao/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/cqqccqc/tao/releases)
 [![Rust](https://img.shields.io/badge/rust-stable%20·%20edition%202024-orange.svg)](https://www.rust-lang.org/)
 [![Stage](https://img.shields.io/badge/stage-alpha%20·%20dogfood-yellow.svg)](#roadmap)
 [![Platform](https://img.shields.io/badge/platform-macOS%20·%20Linux-lightgrey.svg)](#installation)
@@ -20,7 +21,7 @@ tao is a coding agent written in Rust. Its core is not a particular terminal UI 
 
 It is designed alongside [Claude Code](https://github.com/anthropics/claude-code), [OpenAI codex CLI](https://github.com/openai/codex), [gemini-cli](https://github.com/google-gemini/gemini-cli), and [opencode](https://github.com/sst/opencode): deliver the classic coding-agent experience, but push harder on four axes — **multi-surface reuse, sessions as assets, model-agnostic providers, and programmable extension**.
 
-> **Status: alpha / dogfood.** M0–M4 are substantially complete; the author already uses tao for day-to-day development. M5 (hardening) and M6 (web frontend) are in progress. See the [roadmap](#roadmap).
+> **Status: alpha / dogfood.** M0–M4 are substantially complete; the author already uses tao for day-to-day development. M5 (hardening) is in progress; M6 (web frontend) is planned. See the [roadmap](#roadmap).
 
 ---
 
@@ -125,8 +126,8 @@ tao -c model_providers.local.base_url=http://localhost:11434/v1 \
 | `tao proto` | Protocol mode: JSONL `Op`/`Event` over stdin/stdout for any-language frontends/scripts | ✅ |
 | `tao acp` | ACP mode: spawned over stdio by editors like Zed for embedding | ✅ |
 | `tao sessions ls\|show\|share\|audit\|gc` | Session management: fork tree / preview / sanitized export / permission audit / cleanup | ✅ |
-| `tao serve --port N` | Persistent server: TCP/WS, multiple clients attach to one session | 🚧 planned |
-| `tao mcp-serve` | Expose tao itself as an MCP server (list/send/read session) | 🚧 planned |
+| `tao serve --port N` | Persistent server: TCP, multiple clients attach to one session | ✅ |
+| `tao mcp-serve` | Expose tao itself as an MCP server (list/send/read session) | ✅ |
 | `tao login\|logout\|auth` | OAuth / API-key interactive login | 🚧 planned (env vars for now) |
 
 Common global flags: `-c key=value` (config override, dot-paths supported), `--profile <name>`, `--model provider/id`, `--resume <id>`, `--fork`, `--dangerously-bypass-permissions`.
@@ -270,7 +271,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI (`RUSTFLAGS="-D warnings"`) runs fmt / clippy / test green on macOS + Linux as the merge gate. xtask provides dev scripts for snapshot updates and fixture generation.
+CI (`RUSTFLAGS="-D warnings"`) runs fmt / clippy / test green on macOS + Linux as the merge gate. xtask currently exposes a single `ci` task (fmt check + clippy + test).
 
 Design decisions and trade-offs are all recorded in [docs/design/](docs/design/README.md); please read the architecture and protocol docs before diving in.
 

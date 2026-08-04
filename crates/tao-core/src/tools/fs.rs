@@ -102,6 +102,12 @@ impl Tool for ReadTool {
             first_line, last_line, total
         ));
 
+        // 记录已读(供 Edit 校验"先 Read")
+        let canon = path.canonicalize().unwrap_or(path.clone());
+        if let Ok(mut set) = ctx.read_files.lock() {
+            set.insert(canon);
+        }
+
         Ok(ToolOutput::ok(out))
     }
 }

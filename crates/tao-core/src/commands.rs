@@ -134,6 +134,26 @@ pub enum Builtin {
     ModeCycle,
     Compact,
     Sessions,
+    /// `/init`:在 cwd 创建 AGENTS.md 模板。
+    Init,
+    /// `/hooks`:预览当前 hooks 配置(各事件点数量)。
+    Hooks,
+    /// `/mcp`:列出已加载的 MCP 工具。
+    Mcp,
+    /// `/agent`:列出可用的子 agent。
+    Agent,
+    /// `/model`:显示当前 model。
+    Model,
+    /// `/cost`:显示累计 token 用量(需从 TurnEvent 传 usage,暂留 TODO)。
+    Cost,
+    /// `/rewind`:列出最近 checkpoint 栈(ShadowRepo.checkpoint_history)。
+    /// 仅显示列表;回退到最近 checkpoint 用 `/rollback`。
+    /// TODO:支持 `/rewind N` 回退到第 N 个 checkpoint(多级回退)。
+    Rewind,
+    /// `/rollback`:回滚文件到最近 checkpoint(ShadowRepo.rollback)。
+    Rollback,
+    /// `/diff`:显示最近 checkpoint 的改动 diff stat(ShadowRepo.diff_last)。
+    Diff,
 }
 
 /// 解析内置命令。返回 `None` = 非内置(可能是 markdown 模板)。
@@ -145,6 +165,15 @@ pub fn parse_builtin(input: &str) -> Option<Builtin> {
         "/clear" => Some(Builtin::Clear),
         "/compact" => Some(Builtin::Compact),
         "/sessions" => Some(Builtin::Sessions),
+        "/init" => Some(Builtin::Init),
+        "/hooks" => Some(Builtin::Hooks),
+        "/mcp" => Some(Builtin::Mcp),
+        "/agent" => Some(Builtin::Agent),
+        "/model" => Some(Builtin::Model),
+        "/cost" => Some(Builtin::Cost),
+        "/rewind" => Some(Builtin::Rewind),
+        "/rollback" => Some(Builtin::Rollback),
+        "/diff" => Some(Builtin::Diff),
         "/mode" => match input.split_once(' ') {
             Some((_, mode)) => match mode.trim() {
                 "default" => Some(Builtin::Mode(PermissionMode::Default)),

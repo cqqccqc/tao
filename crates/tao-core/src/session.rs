@@ -7,9 +7,9 @@
 //! `recorder` 在关键点记 `LogEvent` 落盘(见 docs/design/sessions.md §1);
 //! `UserInput`/`SessionMeta`/`ModeChange` 由调用方(exec/tui)在 run_turn 外记录。
 
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -56,6 +56,8 @@ pub enum TurnEvent {
     },
     /// 本轮模型流结束(可能还有下一轮工具调用)。
     ModelMessageEnd { stop_reason: StopReason },
+    /// 本轮 token 用量(在 ModelMessageEnd 后发出,供 /cost 展示)。
+    Usage(TokenUsage),
     /// 整个 turn 结束。
     TurnComplete { stop_reason: StopReason, steps: u32 },
     /// 需要用户审批(Ask 判定):前端渲染弹窗,等待按键应答。
@@ -71,6 +73,8 @@ pub enum TurnEvent {
     },
     /// 错误(turn 终止)。
     Error(String),
+    /// 后台通知消息(如"未信任项目"提示),非错误,非 turn 边界。
+    BackgroundEvent(String),
 }
 
 /// turn 执行结果。
@@ -78,6 +82,8 @@ pub enum TurnEvent {
 pub struct TurnResult {
     pub stop_reason: StopReason,
     pub steps: u32,
+    /// 本轮最后一次模型流的 token 用量(供成本展示)。
+    pub usage: TokenUsage,
     /// 完整的对话历史(含本轮新增的 user/assistant/tool_result)。
     pub messages: Vec<ModelMessage>,
 }
@@ -87,11 +93,17 @@ pub struct TurnResult {
 pub struct TurnConfig {
     /// 最大"模型流 → 工具"轮次,防失控。默认 100。
     pub max_steps: u32,
+    /// 受信任的项目 cwd 列表(从 Config.trusted_projects 传入)。
+    /// 若 cwd 不在列表且 session_start hooks 非空,emit BackgroundEvent 提示。
+    pub trusted_projects: Vec<String>,
 }
 
 impl Default for TurnConfig {
     fn default() -> Self {
-        Self { max_steps: 100 }
+        Self {
+            max_steps: 100,
+            trusted_projects: Vec::new(),
+        }
     }
 }
 
@@ -124,27 +136,91 @@ where
     let mut steps: u32 = 0;
     let turn_id = TurnId::new(request.metadata.turn_id.clone().unwrap_or_default());
     let session_id_str = request.metadata.session_id.clone().unwrap_or_default();
+    // turn 级已读文件集(跨工具调用持久,供 Edit 校验"先 Read")
+    let read_files: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
+
+    // UserPromptSubmit hook:turn 执行前跑,可阻断 prompt(v1 不支持 Modify,仅 Block)
+    let prompt_text = messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ModelMessage::User { content } => content.iter().find_map(|c| match c {
+                ModelContent::Text(t) => Some(t.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let up_ctx = HookCtx {
+        session_id: session_id_str.clone(),
+        cwd: cwd.to_path_buf(),
+        tool_name: None,
+        tool_input: Some(Value::String(prompt_text.clone())),
+    };
+    if let HookOutcome::Block(reason) = run_hooks(
+        &HookEvent::UserPromptSubmit { text: prompt_text },
+        &hooks.user_prompt_submit,
+        &up_ctx,
+    )
+    .await
+    {
+        on_event(TurnEvent::Error(format!(
+            "UserPromptSubmit hook 阻断: {reason}"
+        )));
+        record_turn_boundary(recorder, &turn_id, StopReason::Interrupted);
+        return Ok(TurnResult {
+            stop_reason: StopReason::Interrupted,
+            steps: 0,
+            usage: TokenUsage::default(),
+            messages: messages.clone(),
+        });
+    }
+
+    // SessionStart hook:turn 执行前跑(fire-and-forget,不阻断)。
+    // 若 cwd 不在 trusted_projects 且 session_start hooks 非空,提示未信任项目。
+    let is_trusted = config.trusted_projects.iter().any(|p| {
+        let p = std::path::Path::new(p);
+        p == cwd
+    });
+    if !is_trusted && !hooks.session_start.is_empty() {
+        on_event(TurnEvent::BackgroundEvent(format!(
+            "⚠ 未信任项目: {}。session_start hooks 将执行,请确认项目安全。",
+            cwd.display()
+        )));
+    }
+    let ss_ctx = HookCtx {
+        session_id: session_id_str.clone(),
+        cwd: cwd.to_path_buf(),
+        tool_name: None,
+        tool_input: None,
+    };
+    let _ = run_hooks(&HookEvent::SessionStart, &hooks.session_start, &ss_ctx).await;
 
     loop {
         steps += 1;
+        let mut last_usage = TokenUsage::default();
         if steps > config.max_steps {
             on_event(TurnEvent::Error(format!(
                 "max_steps({}) 超限",
                 config.max_steps
             )));
+            run_notification(hooks, "", &session_id_str, cwd).await;
             record_turn_boundary(recorder, &turn_id, StopReason::MaxSteps);
             return Ok(TurnResult {
                 stop_reason: StopReason::MaxSteps,
                 steps: steps - 1,
+                usage: last_usage,
                 messages: messages.clone(),
             });
         }
 
         if cancel.is_cancelled() {
+            run_notification(hooks, "", &session_id_str, cwd).await;
             record_turn_boundary(recorder, &turn_id, StopReason::Interrupted);
             return Ok(TurnResult {
                 stop_reason: StopReason::Interrupted,
                 steps: steps - 1,
+                usage: last_usage,
                 messages: messages.clone(),
             });
         }
@@ -169,14 +245,15 @@ where
         let mut tool_inputs: HashMap<CallId, ToolInputAccum> = HashMap::new();
         let mut tool_order: Vec<CallId> = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
-        let mut last_usage = TokenUsage::default();
 
         while let Some(ev) = stream.next().await {
             if cancel.is_cancelled() {
+                run_notification(hooks, &text_buf, &session_id_str, cwd).await;
                 record_turn_boundary(recorder, &turn_id, StopReason::Interrupted);
                 return Ok(TurnResult {
                     stop_reason: StopReason::Interrupted,
                     steps: steps - 1,
+                    usage: last_usage,
                     messages: messages.clone(),
                 });
             }
@@ -233,7 +310,7 @@ where
             });
         }
         if !text_buf.is_empty() {
-            asst_content.push(ModelContent::Text(text_buf));
+            asst_content.push(ModelContent::Text(text_buf.clone()));
         }
         // 解析工具调用参数。
         let mut tool_calls: Vec<(CallId, String, Value)> = Vec::new();
@@ -266,13 +343,19 @@ where
         });
 
         on_event(TurnEvent::ModelMessageEnd { stop_reason });
+        on_event(TurnEvent::Usage(last_usage));
 
         // 无工具调用 → turn 结束。
         if tool_calls.is_empty() || stop_reason != StopReason::ToolUse {
+            // Notification hook:turn 结束前跑(fire-and-forget),message 取最后 assistant text。
+            run_notification(hooks, &text_buf, &session_id_str, cwd).await;
+            // SessionEnd / Stop hook:正常结束 turn 前跑(若非空)。
+            run_session_end_stop(hooks, &session_id_str, cwd).await;
             record_turn_boundary(recorder, &turn_id, stop_reason);
             return Ok(TurnResult {
                 stop_reason,
                 steps,
+                usage: last_usage,
                 messages: messages.clone(),
             });
         }
@@ -299,6 +382,7 @@ where
                     cancel,
                     &session_id_str,
                     input,
+                    1,
                 )
                 .await;
                 let (ok, summary, content, is_error) = match output {
@@ -363,21 +447,9 @@ where
                             Err(e) => tracing::warn!("shadow 快照失败(skip): {e}"),
                         }
                     }
-                    // PreToolUse hook(Allow 路径;Approve/ApproveForSession v1 跳过,TODO)
-                    let hook_ctx = HookCtx {
-                        session_id: session_id_str.clone(),
-                        cwd: cwd.to_path_buf(),
-                        tool_name: Some(tool_name.to_string()),
-                        tool_input: Some(input.clone()),
-                    };
-                    if let HookOutcome::Block(reason) = run_hooks(
-                        &HookEvent::PreToolUse {
-                            tool: tool_name.to_string(),
-                        },
-                        &hooks.pre_tool_use,
-                        &hook_ctx,
-                    )
-                    .await
+                    // PreToolUse hook
+                    if let Some(reason) =
+                        run_pre_tool_use(hooks, tool_name, input, &session_id_str, cwd).await
                     {
                         let msg = format!("被 hook 阻断: {reason}");
                         on_event(TurnEvent::ToolExecEnd {
@@ -397,7 +469,7 @@ where
                         call_id: call_id.clone(),
                     });
                     let start = Instant::now();
-                    let r = exec_tool(tools, tool_name, input, cwd, cancel).await;
+                    let r = exec_tool(tools, tool_name, input, cwd, cancel, &read_files).await;
                     duration_ms = start.elapsed().as_millis() as u64;
                     r
                 }
@@ -422,11 +494,30 @@ where
                     });
                     match resp {
                         ReviewDecision::Approve => {
+                            if let Some(reason) =
+                                run_pre_tool_use(hooks, tool_name, input, &session_id_str, cwd)
+                                    .await
+                            {
+                                let msg = format!("被 hook 阻断: {reason}");
+                                on_event(TurnEvent::ToolExecEnd {
+                                    call_id: call_id.clone(),
+                                    ok: false,
+                                    summary: "hook 阻断".into(),
+                                });
+                                messages.push(ModelMessage::ToolResult {
+                                    call_id: call_id.clone(),
+                                    content: vec![ModelContent::Text(msg.clone())],
+                                    is_error: true,
+                                });
+                                record_tool_result(recorder, call_id, &msg, true, duration_ms);
+                                continue;
+                            }
                             on_event(TurnEvent::ToolExecBegin {
                                 call_id: call_id.clone(),
                             });
                             let start = Instant::now();
-                            let r = exec_tool(tools, tool_name, input, cwd, cancel).await;
+                            let r =
+                                exec_tool(tools, tool_name, input, cwd, cancel, &read_files).await;
                             duration_ms = start.elapsed().as_millis() as u64;
                             r
                         }
@@ -439,11 +530,30 @@ where
                                     pattern: pat,
                                 });
                             }
+                            if let Some(reason) =
+                                run_pre_tool_use(hooks, tool_name, input, &session_id_str, cwd)
+                                    .await
+                            {
+                                let msg = format!("被 hook 阻断: {reason}");
+                                on_event(TurnEvent::ToolExecEnd {
+                                    call_id: call_id.clone(),
+                                    ok: false,
+                                    summary: "hook 阻断".into(),
+                                });
+                                messages.push(ModelMessage::ToolResult {
+                                    call_id: call_id.clone(),
+                                    content: vec![ModelContent::Text(msg.clone())],
+                                    is_error: true,
+                                });
+                                record_tool_result(recorder, call_id, &msg, true, duration_ms);
+                                continue;
+                            }
                             on_event(TurnEvent::ToolExecBegin {
                                 call_id: call_id.clone(),
                             });
                             let start = Instant::now();
-                            let r = exec_tool(tools, tool_name, input, cwd, cancel).await;
+                            let r =
+                                exec_tool(tools, tool_name, input, cwd, cancel, &read_files).await;
                             duration_ms = start.elapsed().as_millis() as u64;
                             r
                         }
@@ -463,10 +573,12 @@ where
                             continue;
                         }
                         ReviewDecision::Abort => {
+                            run_notification(hooks, &text_buf, &session_id_str, cwd).await;
                             record_turn_boundary(recorder, &turn_id, StopReason::Interrupted);
                             return Ok(TurnResult {
                                 stop_reason: StopReason::Interrupted,
                                 steps,
+                                usage: last_usage,
                                 messages: messages.clone(),
                             });
                         }
@@ -536,13 +648,84 @@ async fn exec_tool(
     input: &Value,
     cwd: &Path,
     cancel: &CancellationToken,
+    read_files: &Arc<Mutex<HashSet<PathBuf>>>,
 ) -> Result<ToolOutput, ToolError> {
     let tool: Arc<dyn Tool> = match tools.get(name) {
         Some(t) => t,
         None => return Ok(ToolOutput::error(format!("未知工具: {name}"))),
     };
-    let ctx = ToolCtx::with_cancel(cwd, cancel.clone());
+    let ctx = ToolCtx::with_cancel_and_reads(cwd, cancel.clone(), read_files.clone());
     tool.call(input, &ctx).await
+}
+
+/// 跑 PreToolUse hook。返回 `Some(reason)` 表示被阻断(Block)。
+/// Allow / Approve / ApproveForSession 三路径统一调用,保证 hook 一致性。
+async fn run_pre_tool_use(
+    hooks: &HooksConfig,
+    tool_name: &str,
+    input: &Value,
+    session_id: &str,
+    cwd: &Path,
+) -> Option<String> {
+    let ctx = HookCtx {
+        session_id: session_id.to_string(),
+        cwd: cwd.to_path_buf(),
+        tool_name: Some(tool_name.to_string()),
+        tool_input: Some(input.clone()),
+    };
+    match run_hooks(
+        &HookEvent::PreToolUse {
+            tool: tool_name.to_string(),
+        },
+        &hooks.pre_tool_use,
+        &ctx,
+    )
+    .await
+    {
+        HookOutcome::Block(reason) => Some(reason),
+        HookOutcome::Pass => None,
+    }
+}
+
+/// 跑 Notification hook(fire-and-forget)。`message` 为最后 assistant text 或空。
+/// 在 run_turn 各 return 点(max_steps / 中断 / abort / end turn)前调用。
+async fn run_notification(hooks: &HooksConfig, message: &str, session_id: &str, cwd: &Path) {
+    if hooks.notification.is_empty() {
+        return;
+    }
+    let ctx = HookCtx {
+        session_id: session_id.to_string(),
+        cwd: cwd.to_path_buf(),
+        tool_name: None,
+        tool_input: None,
+    };
+    let _ = run_hooks(
+        &HookEvent::Notification {
+            message: message.to_string(),
+        },
+        &hooks.notification,
+        &ctx,
+    )
+    .await;
+}
+
+/// 跑 SessionEnd + Stop hook(正常 turn 结束前,fire-and-forget,仅 end-turn return)。
+async fn run_session_end_stop(hooks: &HooksConfig, session_id: &str, cwd: &Path) {
+    if hooks.session_end.is_empty() && hooks.stop.is_empty() {
+        return;
+    }
+    let ctx = HookCtx {
+        session_id: session_id.to_string(),
+        cwd: cwd.to_path_buf(),
+        tool_name: None,
+        tool_input: None,
+    };
+    if !hooks.session_end.is_empty() {
+        let _ = run_hooks(&HookEvent::SessionEnd, &hooks.session_end, &ctx).await;
+    }
+    if !hooks.stop.is_empty() {
+        let _ = run_hooks(&HookEvent::Stop, &hooks.stop, &ctx).await;
+    }
 }
 
 fn summarize(s: &str) -> String {
@@ -567,7 +750,14 @@ async fn exec_task(
     cancel: &CancellationToken,
     session_id: &str,
     input: &Value,
+    depth: u32,
 ) -> Result<ToolOutput, ToolError> {
+    // 防递归失控:子 agent 嵌套深度上限 8(v1 子只读无 Task,实际不嵌套;预防)
+    if depth > 8 {
+        return Ok(ToolOutput::error(format!(
+            "子 agent 嵌套深度超限({depth}),已拒绝"
+        )));
+    }
     let subagent = input.get("subagent").and_then(|v| v.as_str()).unwrap_or("");
     let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
     if subagent.is_empty() {
@@ -579,9 +769,10 @@ async fn exec_task(
         None => return Ok(ToolOutput::error(format!("未知子 agent: {subagent}"))),
     };
     let sub_tools = tools.readonly_subset(&def.tools);
-    let sub_engine = PermissionEngine::new(PermissionMode::Plan, vec![]);
+    let sub_engine =
+        PermissionEngine::new(def.permission_mode.unwrap_or(PermissionMode::Plan), vec![]);
     let (sub_recorder, _sub_id) =
-        JsonlRecorder::create_fork(cwd, &SessionId::new(session_id.to_string()))
+        JsonlRecorder::create_fork(cwd, &SessionId::new(session_id.to_string()), String::new())
             .map_err(|e| ToolError::Failed(format!("子会话创建失败: {e}")))?;
     let sub_model = def.model.clone().unwrap_or_else(|| request.model.clone());
     let sub_system = vec![SystemBlock {
@@ -601,7 +792,10 @@ async fn exec_task(
         temperature: None,
         metadata: RequestMeta::default(),
     };
-    let sub_config = TurnConfig { max_steps: 20 };
+    let sub_config = TurnConfig {
+        max_steps: 20,
+        trusted_projects: Vec::new(),
+    };
     let sub_result = Box::pin(run_turn(
         client,
         &sub_tools,
@@ -635,6 +829,19 @@ async fn exec_task(
             Ok(r) => format!("[子 agent 无文本输出: {:?}]", r.stop_reason),
             Err(e) => format!("[子 agent 错误: {e}]"),
         });
+    let _ = run_hooks(
+        &HookEvent::SubagentStop {
+            name: subagent.to_string(),
+        },
+        &hooks.subagent_stop,
+        &HookCtx {
+            session_id: session_id.to_string(),
+            cwd: cwd.to_path_buf(),
+            tool_name: None,
+            tool_input: None,
+        },
+    )
+    .await;
     Ok(ToolOutput::ok(report))
 }
 

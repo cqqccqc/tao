@@ -14,9 +14,9 @@ pub mod grep;
 pub mod patch;
 pub mod task;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -29,6 +29,8 @@ use crate::permissions::PermissionKey;
 pub struct ToolCtx {
     pub cwd: PathBuf,
     pub cancel: CancellationToken,
+    /// 本 turn 内已 Read 过的文件(canonical 路径),供 Edit 校验"先 Read"防盲改。
+    pub read_files: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl ToolCtx {
@@ -36,6 +38,7 @@ impl ToolCtx {
         Self {
             cwd: cwd.into(),
             cancel: CancellationToken::new(),
+            read_files: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -44,6 +47,20 @@ impl ToolCtx {
         Self {
             cwd: cwd.into(),
             cancel,
+            read_files: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// 带共享 read_files(跨工具调用持久,run_turn 用)。
+    pub fn with_cancel_and_reads(
+        cwd: impl Into<PathBuf>,
+        cancel: CancellationToken,
+        read_files: Arc<Mutex<HashSet<PathBuf>>>,
+    ) -> Self {
+        Self {
+            cwd: cwd.into(),
+            cancel,
+            read_files,
         }
     }
 }

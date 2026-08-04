@@ -67,7 +67,13 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
     let model = opts.model.unwrap_or(model);
 
     let mut tools = ToolRegistry::builtin();
-    tao_mcp::load_mcp_tools(&mut tools, &config.mcp_servers).await;
+    tao_mcp::load_mcp_tools(
+        &mut tools,
+        &config.mcp_servers,
+        config.mcp_tool_budget,
+        config.mcp_lazy,
+    )
+    .await;
     let mut system: Vec<SystemBlock> = Vec::new();
     if let Some(instr) = tao_core::instructions::load(&opts.cwd) {
         system.push(SystemBlock {
@@ -101,18 +107,20 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
         for (t, p) in &state.session_grants {
             eng.grant(t, p);
         }
+        let fp = config.config_fingerprint(&model);
         if opts.fork {
-            let (r, new_id) = JsonlRecorder::create_fork(&cwd, &parent_id)
+            let (r, new_id) = JsonlRecorder::create_fork(&cwd, &parent_id, fp)
                 .map_err(|e| anyhow::anyhow!("创建 fork 会话失败: {e}"))?;
             (r, state.messages, eng, new_id)
         } else {
-            let r = JsonlRecorder::open_existing(&parent_id, &cwd)
+            let r = JsonlRecorder::open_existing(&parent_id, &cwd, fp)
                 .map_err(|e| anyhow::anyhow!("打开会话失败: {e}"))?;
             (r, state.messages, eng, parent_id)
         }
     } else {
+        let fp = config.config_fingerprint(&model);
         let (r, id) =
-            JsonlRecorder::create(&cwd).map_err(|e| anyhow::anyhow!("创建会话失败: {e}"))?;
+            JsonlRecorder::create(&cwd, fp).map_err(|e| anyhow::anyhow!("创建会话失败: {e}"))?;
         let eng = PermissionEngine::new(config.permission_mode, config.permissions.rules.clone());
         (r, Vec::new(), eng, id)
     };
@@ -131,7 +139,7 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
     });
 
     // auto compact:token 估算超阈值则用 small_model(或当前 model)压缩
-    let threshold = (tao_core::DEFAULT_CONTEXT_WINDOW as f32 * config.auto_compact_at) as u64;
+    let threshold = (client.context_window(&model) as f32 * config.auto_compact_at) as u64;
     if tao_core::approx_tokens(&messages) > threshold {
         let cm = config.small_model.as_deref().unwrap_or(&model);
         messages = tao_core::compact(
@@ -160,6 +168,7 @@ pub async fn run(opts: ExecOpts) -> anyhow::Result<()> {
     };
     let config_turn = TurnConfig {
         max_steps: config.max_turn_steps,
+        trusted_projects: config.trusted_projects.clone(),
     };
     let cancel = CancellationToken::new();
     let approver = HeadlessApprover {
@@ -332,8 +341,10 @@ async fn run_json(
                 TurnEvent::ApprovalRequest { call_id, kind, detail } => json!({"type": "approval_request", "call_id": call_id.to_string(), "kind": format!("{:?}", kind), "tool": detail.tool}),
                 TurnEvent::ApprovalResolved { call_id, decision } => json!({"type": "approval_resolved", "call_id": call_id.to_string(), "decision": format!("{:?}", decision)}),
                 TurnEvent::ModelMessageEnd { stop_reason } => json!({"type": "model_message_end", "stop_reason": format!("{:?}", stop_reason)}),
+                TurnEvent::Usage(u) => json!({"type": "usage", "input": u.input, "cached_input": u.cached_input, "output": u.output, "reasoning": u.reasoning}),
                 TurnEvent::TurnComplete { stop_reason, steps } => json!({"type": "turn_complete", "stop_reason": format!("{:?}", stop_reason), "steps": steps}),
                 TurnEvent::Error(msg) => json!({"type": "error", "message": msg}),
+                TurnEvent::BackgroundEvent(msg) => json!({"type": "background_event", "message": msg}),
             };
             println!("{j}");
         },

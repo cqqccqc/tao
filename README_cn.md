@@ -250,7 +250,7 @@ tools: [Read, Grep, Glob, Bash]
 | **M1 会说话的 loop** | 端到端单轮对话：3 个 wire codec + 工具 + turn loop + 最小 TUI | ✅ |
 | **M2 真正的 coder** | 权限+审批、Edit/Patch/Grep/Glob、AGENTS.md、事件日志+resume/fork、compaction、markdown 渲染 | ✅ |
 | **M3 可扩展平台** | slash 命令、hooks、子 agent、MCP（OAuth 跳过留后续） | ✅ 4/5 |
-| **M4 会话与协作** | skills、ACP、shadow-git checkpoint+rollback、会话浏览器、share 导出（serve / mcp-serve 留后续） | ✅ 5/7 |
+| **M4 会话与协作** | skills、ACP、shadow-git checkpoint+rollback、会话浏览器、share 导出、mcp-serve、serve | ✅ 7/7 |
 | **M5 硬化** | OS 沙箱（seatbelt/landlock）、逃逸分析加强、性能与崩溃恢复审计、Windows 评估 | 🚧 |
 | **M6 tao-web-ui** | 第二前端验证协议：web 消费 serve 协议、多客户端 attach、反向验证 core 无 UI 假设 | ⬜ |
 

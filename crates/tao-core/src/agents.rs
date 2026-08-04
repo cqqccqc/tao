@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tao_protocol::permission::PermissionMode;
 
 /// 子 agent 定义(frontmatter + system_prompt)。
 #[derive(Debug, Clone)]
@@ -15,6 +16,8 @@ pub struct SubagentDef {
     pub tools: Vec<String>,
     /// 覆盖模型(省略 = 继承父级)。
     pub model: Option<String>,
+    /// 覆盖权限模式(省略 = Plan 只读)。
+    pub permission_mode: Option<PermissionMode>,
     pub system_prompt: String,
 }
 
@@ -52,6 +55,7 @@ fn parse_agent(path: &Path) -> Option<SubagentDef> {
     let mut description = String::new();
     let mut tools = Vec::new();
     let mut model = None;
+    let mut permission_mode = None;
     for line in fm.lines() {
         if let Some(v) = line.strip_prefix("description:") {
             description = v.trim().trim_matches('"').to_string();
@@ -71,6 +75,14 @@ fn parse_agent(path: &Path) -> Option<SubagentDef> {
             if !n.is_empty() {
                 name = n;
             }
+        } else if let Some(v) = line.strip_prefix("permission_mode:") {
+            permission_mode = match v.trim().trim_matches('"') {
+                "plan" => Some(PermissionMode::Plan),
+                "default" => Some(PermissionMode::Default),
+                "accept-edits" | "accept_edits" => Some(PermissionMode::AcceptEdits),
+                "bypass" => Some(PermissionMode::Bypass),
+                _ => None,
+            };
         }
     }
     let system_prompt = body.trim().to_string();
@@ -85,6 +97,7 @@ fn parse_agent(path: &Path) -> Option<SubagentDef> {
         description,
         tools,
         model,
+        permission_mode,
         system_prompt,
     })
 }

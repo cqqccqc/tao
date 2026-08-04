@@ -2,6 +2,7 @@
 //! 负责:重试(429/5xx/网络)、流空闲超时、取消传播、tracing span。
 //! 见 docs/design/providers.md §4。
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use eventsource_stream::Eventsource;
@@ -17,7 +18,7 @@ pub struct HttpSseClient {
     client: Client,
     /// 单次请求(连接 + 收到首字节)最大重试次数。
     pub request_max_retries: u32,
-    /// 流中断后整体重试次数(M1 暂未使用:流断直接上抛)。
+    /// 流中断后整体重试次数:流错误时重新发请求(带 Last-Event-ID 续传)。
     pub stream_max_retries: u32,
     pub stream_idle_timeout: Duration,
 }
@@ -52,11 +53,17 @@ impl HttpSseClient {
 pub struct SseEvent {
     pub event: Option<String>,
     pub data: String,
+    /// SSE 事件 ID(用于 Last-Event-ID 续传)。大多数 provider 不发送。
+    pub id: Option<String>,
 }
 
 impl HttpSseClient {
     /// 发起 SSE 请求,带重试与取消。
     /// `build_request` 在每次重试时调用,确保 header/body 重新生成。
+    ///
+    /// 两级重试:
+    /// 1. 请求级(连接 / 首字节):`request_max_retries` 次,429/5xx/网络错误触发。
+    /// 2. 流级(中途断开):`stream_max_retries` 次,带 `Last-Event-ID` header 续传。
     pub async fn sse_stream<F>(
         &self,
         build_request: F,
@@ -65,6 +72,7 @@ impl HttpSseClient {
     where
         F: Fn(&Client) -> RequestBuilder + Send + Sync + 'static,
     {
+        let build_request = Arc::new(build_request);
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
@@ -73,7 +81,18 @@ impl HttpSseClient {
             }
             let req = build_request(&self.client);
             match self.do_request(req, cancel).await {
-                Ok(stream) => return Ok(stream.boxed()),
+                Ok(stream) => {
+                    // 用带流级重试的 wrapper 包裹流
+                    let retry_stream = stream_with_retry(
+                        self.client.clone(),
+                        build_request.clone(),
+                        self.stream_max_retries,
+                        self.stream_idle_timeout,
+                        cancel.clone(),
+                        stream,
+                    );
+                    return Ok(retry_stream.boxed());
+                }
                 Err(err) => {
                     let retryable = matches!(err, ModelError::Retryable(_));
                     if !retryable || attempt > self.request_max_retries {
@@ -105,11 +124,104 @@ impl HttpSseClient {
             return Err(map_status_error(status, resp).await);
         }
         let sse = resp.bytes_stream().eventsource();
-        Ok(idle_timeout(
+        Ok(idle_timeout_stream(
             sse,
             self.stream_idle_timeout,
             cancel.child_token(),
         ))
+    }
+}
+
+/// 流级重试 wrapper:流中断(非取消)时,带 `Last-Event-ID` header 重新发请求。
+/// 最多重试 `max_retries` 次;取消或不可重试错误直接上抛。
+fn stream_with_retry(
+    client: Client,
+    build_request: Arc<dyn Fn(&Client) -> RequestBuilder + Send + Sync + 'static>,
+    max_retries: u32,
+    idle_timeout: Duration,
+    cancel: CancellationToken,
+    initial_stream: impl Stream<Item = Result<SseEvent, ModelError>> + Send + 'static,
+) -> impl Stream<Item = Result<SseEvent, ModelError>> + Send + 'static {
+    use async_stream::stream;
+
+    let mut current_stream = initial_stream.boxed();
+    let mut retries_remaining = max_retries;
+    let mut last_event_id: Option<String> = None;
+
+    stream! {
+        loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+            match current_stream.next().await {
+                Some(Ok(ev)) => {
+                    // 追踪 event id 用于 Last-Event-ID 续传
+                    if let Some(id) = &ev.id {
+                        last_event_id = Some(id.clone());
+                    }
+                    yield Ok(ev);
+                }
+                Some(Err(e)) => {
+                    // 取消或不可重试错误直接上抛
+                    if cancel.is_cancelled() || retries_remaining == 0 {
+                        yield Err(e);
+                        return;
+                    }
+                    // 只重试可重试错误(流中断 / 网络错误),不重试 fatal / auth
+                    let should_retry = matches!(e, ModelError::Retryable(_) | ModelError::Stream(_));
+                    if !should_retry {
+                        yield Err(e);
+                        return;
+                    }
+                    retries_remaining -= 1;
+                    let backoff_dur = backoff(max_retries - retries_remaining);
+                    debug!(
+                        remaining = retries_remaining,
+                        backoff_ms = backoff_dur.as_millis(),
+                        "SSE 流中断,重试"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff_dur) => {}
+                        _ = cancel.cancelled() => {
+                            yield Err(ModelError::Retryable("已取消".into()));
+                            return;
+                        }
+                    }
+                    // 重新发请求,带 Last-Event-ID header
+                    let mut req = build_request(&client);
+                    if let Some(id) = &last_event_id {
+                        req = req.header("Last-Event-ID", id.as_str());
+                    }
+                    match req.send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            let sse = resp.bytes_stream().eventsource();
+                            current_stream =
+                                idle_timeout_stream(sse, idle_timeout, cancel.child_token()).boxed();
+                        }
+                        Ok(resp) => {
+                            let status = resp.status();
+                            let body = resp.text().await.unwrap_or_default();
+                            // 构造错误:不走 map_status_error(需要 Response,此处已消费)
+                            let err = match status.as_u16() {
+                                401 | 403 => ModelError::Auth(format!("{}: {}", status, truncate(&body, 200))),
+                                429 => ModelError::Retryable(format!("429 限流: {}", truncate(&body, 200))),
+                                s if (500..600).contains(&s) => {
+                                    ModelError::Retryable(format!("{s}: {}", truncate(&body, 200)))
+                                }
+                                s => ModelError::Fatal(format!("{s}: {}", truncate(&body, 200))),
+                            };
+                            yield Err(err);
+                            return;
+                        }
+                        Err(e) => {
+                            yield Err(map_reqwest_err(e));
+                            return;
+                        }
+                    }
+                }
+                None => return,
+            }
+        }
     }
 }
 
@@ -149,7 +261,7 @@ fn truncate(s: &str, n: usize) -> &str {
 }
 
 /// 给 SSE 流套一个 idle timeout:超时产出 StreamError。
-fn idle_timeout(
+fn idle_timeout_stream(
     s: impl Stream<
         Item = Result<
             eventsource_stream::Event,
@@ -170,7 +282,8 @@ fn idle_timeout(
                 item = s.next() => match item {
                     Some(Ok(ev)) => {
                         let event = if ev.event.is_empty() { None } else { Some(ev.event) };
-                        let out = Ok(SseEvent { event, data: ev.data });
+                        let id = if ev.id.is_empty() { None } else { Some(ev.id) };
+                        let out = Ok(SseEvent { event, data: ev.data, id });
                         Some((out, (s, dur, cancel, tokio::time::Instant::now())))
                     }
                     Some(Err(e)) => {

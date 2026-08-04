@@ -30,6 +30,10 @@ globset.workspace = true
 similar.workspace = true
 glob.workspace = true
 regex.workspace = true
+ignore.workspace = true
+fs2 = "0.4"
+redb = "2"
+tiktoken-rs = "0.6"
 
 [dev-dependencies]
 wiremock.workspace = true

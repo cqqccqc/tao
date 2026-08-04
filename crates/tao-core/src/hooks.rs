@@ -20,6 +20,9 @@ pub enum HookEvent {
     SessionEnd,
     PreToolUse { tool: String },
     PostToolUse { tool: String },
+    UserPromptSubmit { text: String },
+    Notification { message: String },
+    SubagentStop { name: String },
     Stop,
 }
 
@@ -31,6 +34,9 @@ impl HookEvent {
             HookEvent::SessionEnd => "SessionEnd",
             HookEvent::PreToolUse { .. } => "PreToolUse",
             HookEvent::PostToolUse { .. } => "PostToolUse",
+            HookEvent::UserPromptSubmit { .. } => "UserPromptSubmit",
+            HookEvent::Notification { .. } => "Notification",
+            HookEvent::SubagentStop { .. } => "SubagentStop",
             HookEvent::Stop => "Stop",
         }
     }
@@ -82,22 +88,34 @@ pub enum HookOutcome {
     Block(String),
 }
 
-/// 运行一组 hook(串行,Block 短路)。`hooks` 应已按事件点过滤。
+/// 运行一组 hook(并行,任一 Block 则 Block)。`hooks` 应已按事件点过滤。
+/// v1:并行不短路(全部跑完再聚合 Block);hook 数量少,影响小。
 pub async fn run_hooks(event: &HookEvent, hooks: &[HookConfig], ctx: &HookCtx) -> HookOutcome {
-    for hook in hooks {
-        if !matches_event(event, &hook.matcher) {
-            continue;
-        }
-        match exec_hook(&hook.command, event, ctx, hook.timeout_ms).await {
-            HookExecResult::Pass => continue,
-            HookExecResult::Block(reason) => return HookOutcome::Block(reason),
+    use futures::future::join_all;
+    let futs: Vec<_> = hooks
+        .iter()
+        .filter(|h| matches_event(event, &h.matcher))
+        .map(|h| exec_hook(&h.command, event, ctx, h.timeout_ms))
+        .collect();
+    let results = join_all(futs).await;
+    let mut block: Option<String> = None;
+    for r in results {
+        match r {
+            HookExecResult::Pass => {}
+            HookExecResult::Block(reason) => {
+                if block.is_none() {
+                    block = Some(reason);
+                }
+            }
             HookExecResult::Error(e) => {
-                tracing::warn!("hook 非阻断错误({}): {e}", hook.command);
-                continue;
+                tracing::warn!("hook 非阻断错误: {e}");
             }
         }
     }
-    HookOutcome::Pass
+    match block {
+        Some(reason) => HookOutcome::Block(reason),
+        None => HookOutcome::Pass,
+    }
 }
 
 fn matches_event(event: &HookEvent, matcher: &str) -> bool {

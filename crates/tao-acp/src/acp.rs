@@ -126,7 +126,13 @@ impl AcpServer {
         };
 
         let mut tools = ToolRegistry::builtin();
-        tao_mcp::load_mcp_tools(&mut tools, &config.mcp_servers).await;
+        tao_mcp::load_mcp_tools(
+            &mut tools,
+            &config.mcp_servers,
+            config.mcp_tool_budget,
+            config.mcp_lazy,
+        )
+        .await;
         let tools = Arc::new(tools);
 
         let engine = Arc::new(PermissionEngine::new(
@@ -134,10 +140,11 @@ impl AcpServer {
             config.permissions.rules.clone(),
         ));
 
-        let (recorder, session_id) = match JsonlRecorder::create(&cwd) {
-            Ok(r) => r,
-            Err(e) => return json!({"error": format!("会话创建失败: {e}")}),
-        };
+        let (recorder, session_id) =
+            match JsonlRecorder::create(&cwd, config.config_fingerprint(&model)) {
+                Ok(r) => r,
+                Err(e) => return json!({"error": format!("会话创建失败: {e}")}),
+            };
         let recorder = Arc::new(recorder);
 
         self.session = Some(AcpSession {
@@ -219,7 +226,10 @@ impl AcpServer {
         session.cancel = Some(cancel.clone());
 
         let hooks = session.hooks.clone();
-        let config_turn = TurnConfig { max_steps: 100 };
+        let config_turn = TurnConfig {
+            max_steps: 100,
+            trusted_projects: Vec::new(),
+        };
         let sid = session.session_id.clone();
 
         let result = run_turn(

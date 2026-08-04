@@ -153,7 +153,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cwd = dir.path().join("proj");
         std::fs::create_dir_all(&cwd).unwrap();
-        let (recorder, id) = JsonlRecorder::create_with_base(&cwd, dir.path()).unwrap();
+        let (recorder, id) =
+            JsonlRecorder::create_with_base(&cwd, dir.path(), String::new()).unwrap();
         recorder.record(LogEvent::UserInput {
             content: vec![Content::text("hi")],
             turn_id: TurnId::new("t1"),
@@ -166,7 +167,7 @@ mod tests {
             pattern: "cargo *".into(),
         });
 
-        let state = replay(recorder.path()).unwrap();
+        let state = replay(&recorder.path()).unwrap();
         assert_eq!(state.id, id);
         assert_eq!(state.mode, PermissionMode::Plan);
         assert!(
@@ -182,7 +183,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cwd = dir.path().join("proj");
         std::fs::create_dir_all(&cwd).unwrap();
-        let (recorder, _id) = JsonlRecorder::create_with_base(&cwd, dir.path()).unwrap();
+        let (recorder, _id) =
+            JsonlRecorder::create_with_base(&cwd, dir.path(), String::new()).unwrap();
         recorder.record(LogEvent::AssistantMessage {
             content: vec![Content::ToolUse {
                 call_id: CallId::new("c1"),
@@ -198,7 +200,7 @@ mod tests {
             duration_ms: 10,
         });
 
-        let state = replay(recorder.path()).unwrap();
+        let state = replay(&recorder.path()).unwrap();
         assert_eq!(state.messages.len(), 2); // Assistant + ToolResult
         assert!(matches!(state.messages[0], ModelMessage::Assistant { .. }));
         if let ModelMessage::ToolResult {
@@ -221,7 +223,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cwd = dir.path().join("proj");
         std::fs::create_dir_all(&cwd).unwrap();
-        let (recorder, _id) = JsonlRecorder::create_with_base(&cwd, dir.path()).unwrap();
+        let (recorder, _id) =
+            JsonlRecorder::create_with_base(&cwd, dir.path(), String::new()).unwrap();
         recorder.record(LogEvent::UserInput {
             content: vec![Content::text("msg1")],
             turn_id: TurnId::new("t1"),
@@ -241,7 +244,7 @@ mod tests {
             turn_id: TurnId::new("t2"),
         });
 
-        let state = replay(recorder.path()).unwrap();
+        let state = replay(&recorder.path()).unwrap();
         // [Assistant(摘要)] + [a1](kept) + [msg2]
         assert_eq!(state.messages.len(), 3);
         if let ModelMessage::Assistant { content } = &state.messages[0] {

@@ -59,7 +59,7 @@ impl PermissionKey {
 /// 便于在 `Arc<PermissionEngine>` 上跨 turn / 跨 task 共享。
 pub struct PermissionEngine {
     mode: Mutex<PermissionMode>,
-    rules: Vec<PermissionRule>,
+    rules: Mutex<Vec<PermissionRule>>,
     session_grants: Mutex<HashSet<(String, String)>>,
 }
 
@@ -67,7 +67,7 @@ impl PermissionEngine {
     pub fn new(mode: PermissionMode, rules: Vec<PermissionRule>) -> Self {
         Self {
             mode: Mutex::new(mode),
-            rules,
+            rules: Mutex::new(rules),
             session_grants: Mutex::new(HashSet::new()),
         }
     }
@@ -79,6 +79,12 @@ impl PermissionEngine {
     /// 运行时切换模式(TUI shift+tab 用)。turn 之间生效。
     pub fn set_mode(&self, mode: PermissionMode) {
         *self.mode.lock().unwrap() = mode;
+    }
+
+    /// 加一条运行时规则(Session scope,`Op::AddPermissionRule`)。
+    /// 不写 config 文件(Project/User 持久化留 TODO)。
+    pub fn add_rule(&self, rule: PermissionRule) {
+        self.rules.lock().unwrap().push(rule);
     }
 
     /// 记录一条会话级授权(`ApproveForSession`)。resume 时由持久化层重放恢复。
@@ -181,7 +187,7 @@ impl PermissionEngine {
         key: Option<&PermissionKey>,
     ) -> Option<(RuleAction, PermissionRule)> {
         let mut best: Option<(RuleAction, PermissionRule, usize)> = None;
-        for rule in &self.rules {
+        for rule in self.rules.lock().unwrap().iter() {
             if !tool_matches(&rule.tool, tool) || !pattern_matches(&rule.pattern, key) {
                 continue;
             }

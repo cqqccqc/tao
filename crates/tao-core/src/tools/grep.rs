@@ -1,8 +1,7 @@
 //! Grep 工具:内容搜索(见 docs/design/tools.md §2)。
 //!
 //! - 优先调 `rg` 二进制(argv/超时/cancel-on-drop/输出截断);`rg` 不在 PATH 时
-//!   fallback 到 `regex` + `std::fs` 递归遍历(跳过 .git/target/node_modules 等,
-//!   无 .gitignore 语义——v1 简化,rg 优先时无此问题)。
+//!   fallback 到 `regex` + `ignore` crate 遍历(尊重 .gitignore / 隐藏文件)。
 //! - permission_key 返回 None(read 类,默认 Allow)。
 
 use std::path::{Path, PathBuf};
@@ -21,16 +20,6 @@ use crate::tools::{Tool, ToolCtx, ToolError, ToolOutput};
 
 const GREP_TIMEOUT_MS: u64 = 30_000;
 const OUTPUT_HEAD: usize = 10_000;
-const SKIP_DIRS: &[&str] = &[
-    ".git",
-    "target",
-    "node_modules",
-    ".next",
-    "dist",
-    ".cache",
-    "__pycache__",
-    ".venv",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputMode {
@@ -222,37 +211,30 @@ fn walk(
     if cancel.is_cancelled() || out.len() > OUTPUT_HEAD * 2 {
         return;
     }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
+    let mut builder = ignore::WalkBuilder::new(dir);
+    builder.hidden(true).git_ignore(true).git_exclude(true);
+    for entry in builder.build() {
         if cancel.is_cancelled() {
             return;
         }
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if path.is_dir() {
-            if SKIP_DIRS.contains(&name_str.as_ref()) {
-                continue;
-            }
-            walk(&path, re, glob, mode, cancel, out);
-        } else if path.is_file() {
-            if let Some(g) = glob
-                && !g.is_match(&path)
-            {
-                continue;
-            }
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                for (i, line) in content.lines().enumerate() {
-                    if re.is_match(line) {
-                        if mode == OutputMode::Files {
-                            out.push_str(&format!("{}\n", path.display()));
-                            break;
-                        }
-                        out.push_str(&format!("{}:{}:{}\n", path.display(), i + 1, line));
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(g) = glob
+            && !g.is_match(path)
+        {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for (i, line) in content.lines().enumerate() {
+                if re.is_match(line) {
+                    if mode == OutputMode::Files {
+                        out.push_str(&format!("{}\n", path.display()));
+                        break;
                     }
+                    out.push_str(&format!("{}:{}:{}\n", path.display(), i + 1, line));
                 }
             }
         }

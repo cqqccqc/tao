@@ -250,7 +250,7 @@ The full design docs (architecture / protocol / agent loop / providers / tools /
 | **M1 talking loop** | end-to-end single turn: 3 wire codecs + tools + turn loop + minimal TUI | ✅ |
 | **M2 real coder** | permissions+approvals, Edit/Patch/Grep/Glob, AGENTS.md, event log+resume/fork, compaction, markdown rendering | ✅ |
 | **M3 extensible platform** | slash commands, hooks, subagents, MCP (OAuth deferred) | ✅ 4/5 |
-| **M4 sessions & collaboration** | skills, ACP, shadow-git checkpoint+rollback, session browser, share export (serve / mcp-serve deferred) | ✅ 5/7 |
+| **M4 sessions & collaboration** | skills, ACP, shadow-git checkpoint+rollback, session browser, share export, mcp-serve, serve | ✅ 7/7 |
 | **M5 hardening** | OS sandbox (seatbelt/landlock), stronger escape analysis, performance & crash-recovery audit, Windows evaluation | 🚧 |
 | **M6 tao-web-ui** | validate the protocol with a second frontend: web consuming the serve protocol, multi-client attach, proving core has no UI assumptions | ⬜ |
 

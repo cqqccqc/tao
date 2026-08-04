@@ -21,4 +21,10 @@ pub trait ModelClient: Send + Sync {
         req: &ModelRequest,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<BoxStream<'static, Result<ModelStreamEvent, ModelError>>, ModelError>;
+
+    /// 该 model 的上下文窗口(token 数),用于 auto-compact 阈值。
+    /// 默认 200k;provider 按 model 名覆盖(如 glm-* → 128k,防短窗口模型爆炸)。
+    fn context_window(&self, _model: &str) -> u64 {
+        200_000
+    }
 }

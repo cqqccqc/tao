@@ -8,7 +8,7 @@
 | **M1 会说话的 loop** | 端到端单轮对话 | providers(3 个 wire codec)+ SSE + 重试;system 提示;Bash/Read/Write 三个工具;turn loop;TUI 最小可用(输入+流式文本) | 3–4 周 |
 | **M2 真正的 coder** | 编码工作流闭环(✅ 完成) | ✅权限模式+规则+审批弹窗(M2-1);✅Edit/Patch/Grep/Glob(M2-2);✅AGENTS.md 指令文件(M2-3);✅事件日志+resume/fork(M2-4);✅compaction(M2-5);✅markdown 渲染(M2-6) | 4–6 周 |
 | **M3 可扩展平台** | 生态机制(4/5 完成) | ✅slash(M3-1);✅hooks(M3-2);✅子agent(M3-3);✅MCP(M3-4);✅AGENTS.md(M2-3);⬜OAuth(跳过,留后续) | 3–4 周 |
-| **M4 会话与协作** | 会话资产化(5/7 完成) | ✅技能(SKILL.md)(M4-1);✅tao acp(M4-2);✅shadow-git checkpoint+rollback(M4-3);✅会话浏览器(M4-5);✅share 导出(M4-6);⬜tao serve;⬜tao mcp-serve | 4–5 周 |
+| **M4 会话与协作** | 会话资产化(7/7 完成) | ✅技能(SKILL.md)(M4-1);✅tao acp(M4-2);✅shadow-git checkpoint+rollback(M4-3);✅会话浏览器(M4-5);✅share 导出(M4-6);✅tao mcp-serve(M4);✅tao serve(M4) | 4–5 周 |
 | **M5 硬化** | 安全与性能 | OS 沙箱(seatbelt/landlock);逃逸分析加强;性能达标(启动/渲染/内存);崩溃恢复审计;Windows 基础支持评估 | 3–4 周 |
 | **M6 tao-web-ui** | 第二前端验证协议 | web 前端(消费 serve 协议);多客户端 attach;反向验证 core 无 UI 假设 | 视前端栈而定 |
 

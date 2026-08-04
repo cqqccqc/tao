@@ -1,6 +1,13 @@
 //! TUI 渲染:inline viewport + 输入框 + 流式文本 + 工具状态。
 //! 见 docs/design/tui.md §3。
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{FontStyle, Style as SyntectStyle, Theme, ThemeSet};
+use syntect::parsing::SyntaxSet;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -51,6 +58,8 @@ pub struct RenderState<'a> {
     pub model: &'a str,
     pub mode: PermissionMode,
     pub pending_approval: Option<&'a PendingApproval>,
+    /// L4b viewport 滚动偏移:N = 从底部往上 N 行(0 = 跟随底部/最新)。
+    pub scroll_offset: usize,
 }
 
 pub fn draw(f: &mut Frame, state: &RenderState) {
@@ -104,8 +113,17 @@ pub fn draw(f: &mut Frame, state: &RenderState) {
         )));
     }
 
-    let history = Paragraph::new(lines).wrap(Wrap { trim: false });
-    f.render_widget(history, chunks[0]);
+    // L4b viewport:auto-follow-to-bottom。scroll_offset = 从底部往上 N 行
+    // (0 = 跟随底部/最新)。line_count 在 ratatui 0.29 是 unstable/private,
+    // 用 lines.len() 近似(不含 wrap 行,滚动不精确但可用)。
+    let viewport = chunks[0].height as usize;
+    let total = lines.len();
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let max_scroll = total.saturating_sub(viewport);
+    let scroll_y = max_scroll
+        .saturating_sub(state.scroll_offset)
+        .min(u16::MAX as usize) as u16;
+    f.render_widget(para.scroll((scroll_y, 0)), chunks[0]);
 
     // ---- 状态行 ----
     let mode_color = match state.mode {
@@ -278,14 +296,50 @@ fn push_assistant_lines(lines: &mut Vec<Line>, text: &str) {
     }
 }
 
+// ---- L4d markdown 行缓存 ----
+
+/// markdown 渲染结果 LRU 缓存(限 64,超则全清)。key = text hash。
+static MD_CACHE: OnceLock<Mutex<HashMap<u64, Vec<Line<'static>>>>> = OnceLock::new();
+const MD_CACHE_CAP: usize = 64;
+
+fn md_cache() -> &'static Mutex<HashMap<u64, Vec<Line<'static>>>> {
+    MD_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn text_hash(s: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
 /// markdown → ratatui Lines(标题/段落/列表/代码块/行内代码/强调/Rule)。
+///
+/// L4d 行缓存:LRU-ish(HashMap + 限 64,超则全清)。key = text hash。
+/// live_text 流式每次 text 不同,缓存命中低但 LRU 上限防爆破。
 fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
-    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    let key = text_hash(text);
+    if let Some(hit) = md_cache().lock().unwrap().get(&key).cloned() {
+        return hit;
+    }
+    let lines = parse_markdown(text);
+    let mut cache = md_cache().lock().unwrap();
+    if cache.len() >= MD_CACHE_CAP {
+        cache.clear();
+    }
+    cache.insert(key, lines.clone());
+    lines
+}
+
+/// markdown → ratatui Lines 实际解析(无缓存)。
+fn parse_markdown(text: &str) -> Vec<Line<'static>> {
+    use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
     let parser = Parser::new(text);
     let mut lines: Vec<Line> = Vec::new();
     let mut spans: Vec<Span> = Vec::new();
     let mut style = Style::default();
     let mut in_code = false;
+    let mut code_lang: String = String::new();
+    let mut code_buf: String = String::new();
     let mut list_depth: usize = 0;
 
     for event in parser {
@@ -303,14 +357,23 @@ fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
             Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => {
                 push_line(&mut spans, &mut lines);
             }
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                // Flush any pending inline spans, then start buffering code text.
                 push_line(&mut spans, &mut lines);
                 in_code = true;
-                style = Style::default().fg(Color::Gray);
+                code_lang = match kind {
+                    CodeBlockKind::Fenced(lang) => lang.into_string(),
+                    CodeBlockKind::Indented => String::new(),
+                };
+                code_buf.clear();
             }
             Event::End(TagEnd::CodeBlock) => {
+                // Spans are empty during a code block (text went to code_buf),
+                // but flush defensively in case of malformed input.
                 push_line(&mut spans, &mut lines);
                 in_code = false;
+                lines.extend(highlight_code_block(&code_buf, &code_lang));
+                code_buf.clear();
                 style = Style::default();
             }
             Event::Start(Tag::List(_)) => list_depth += 1,
@@ -329,14 +392,7 @@ fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
             Event::End(TagEnd::Strong) => style = style.remove_modifier(Modifier::BOLD),
             Event::Text(t) => {
                 if in_code {
-                    for (i, l) in t.split('\n').enumerate() {
-                        if i > 0 {
-                            push_line(&mut spans, &mut lines);
-                        }
-                        if !l.is_empty() {
-                            spans.push(Span::styled(format!("  {l}"), style));
-                        }
-                    }
+                    code_buf.push_str(&t);
                 } else {
                     spans.push(Span::styled(t.to_string(), style));
                 }
@@ -355,6 +411,105 @@ fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
     }
     push_line(&mut spans, &mut lines);
     lines
+}
+
+// ---- syntect 代码块语法高亮 ----
+
+/// 内置常用语言的 SyntaxSet,加载一次后缓存(newline-aware 模式)。
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+/// 默认 ThemeSet,加载一次后缓存。
+static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+
+fn syntax_set() -> &'static SyntaxSet {
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+fn theme_set() -> &'static ThemeSet {
+    THEME_SET.get_or_init(ThemeSet::load_defaults)
+}
+
+/// 从默认 ThemeSet 中选一个深色主题。优先 base16-ocean.dark,其次几个备选,
+/// 最后 fallback 到任意一个(ThemeSet 至少包含一个主题,否则 panic)。
+#[allow(clippy::explicit_auto_deref)]
+fn default_theme() -> &'static Theme {
+    static THEME: OnceLock<&'static Theme> = OnceLock::new();
+    *THEME.get_or_init(|| {
+        let ts = theme_set();
+        [
+            "base16-ocean.dark",
+            "base16-eighties.dark",
+            "base16-mocha.dark",
+        ]
+        .iter()
+        .find_map(|name| ts.themes.get(*name))
+        .or_else(|| ts.themes.values().next())
+        .expect("syntect default ThemeSet must contain at least one theme")
+    })
+}
+
+/// syntect Style → ratatui Style(前景色 + 字体修饰)。
+fn syntect_style_to_ratatui(s: SyntectStyle) -> Style {
+    let fg = Color::Rgb(s.foreground.r, s.foreground.g, s.foreground.b);
+    let mut style = Style::default().fg(fg);
+    let fs = s.font_style;
+    if fs.contains(FontStyle::BOLD) {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if fs.contains(FontStyle::ITALIC) {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if fs.contains(FontStyle::UNDERLINE) {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
+    style
+}
+
+/// 按 fenced lang 用 syntect 高亮代码块,每行一个 ratatui `Line`(2 空格缩进)。
+///
+/// 无 lang / 未识别语言时 fallback 为原来的 Gray 缩进渲染。
+fn highlight_code_block(code: &str, lang: &str) -> Vec<Line<'static>> {
+    let ss = syntax_set();
+    let theme = default_theme();
+    let syntax = if !lang.is_empty() {
+        ss.find_syntax_by_token(lang)
+            .or_else(|| ss.find_syntax_by_extension(lang))
+            .or_else(|| ss.find_syntax_by_name(lang))
+    } else {
+        None
+    };
+
+    let Some(syntax) = syntax else {
+        // Fallback:保持原有行为 —— Gray 着色 + 2 空格缩进。
+        return code
+            .lines()
+            .map(|l| {
+                Line::from(vec![Span::styled(
+                    format!("  {l}"),
+                    Style::default().fg(Color::Gray),
+                )])
+            })
+            .collect();
+    };
+
+    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut result: Vec<Line> = Vec::new();
+    // newline-aware:给每行补一个 '\n' 再喂给 highlighter,这样多行构造
+    // (块注释等)在 load_defaults_newlines() 下能正确解析。
+    for line in code.lines() {
+        let with_nl = format!("{line}\n");
+        let ranges = highlighter.highlight_line(&with_nl, ss).unwrap_or_default();
+        let mut spans: Vec<Span> = Vec::with_capacity(ranges.len() + 1);
+        spans.push(Span::raw("  ")); // 2 空格缩进,与原渲染一致
+        for (st, text) in ranges {
+            // 去掉可能粘在 span 末尾的换行符(ratatui Span 不应含 '\n')
+            let text = text.strip_suffix('\n').unwrap_or(text);
+            if !text.is_empty() {
+                spans.push(Span::styled(text.to_string(), syntect_style_to_ratatui(st)));
+            }
+        }
+        result.push(Line::from(spans));
+    }
+    result
 }
 
 /// diff/工具输出:行首 +/-/@@/---/+++ 着色。

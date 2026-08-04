@@ -162,7 +162,10 @@ async fn run_with_full(
         temperature: None,
         metadata: Default::default(),
     };
-    let config = TurnConfig { max_steps: 10 };
+    let config = TurnConfig {
+        max_steps: 10,
+        trusted_projects: Vec::new(),
+    };
     let collected: Arc<Mutex<Vec<TurnEvent>>> = Arc::new(Mutex::new(vec![]));
     let collected2 = collected.clone();
     let result = run_turn(

@@ -69,6 +69,15 @@ impl AnthropicClient {
 
 #[async_trait]
 impl ModelClient for AnthropicClient {
+    /// 按 model 名返回上下文窗口:glm-* → 128k(meituan 等),claude-* / 其余 → 200k。
+    fn context_window(&self, model: &str) -> u64 {
+        if model.contains("glm") {
+            128_000
+        } else {
+            200_000
+        }
+    }
+
     async fn stream(
         &self,
         req: &ModelRequest,

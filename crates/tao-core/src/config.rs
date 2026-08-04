@@ -68,6 +68,20 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     pub hooks: HooksConfig,
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    /// MCP 工具注册预算:超过则折叠(只注册前 budget 个 + warn)。
+    /// ToolSearch 元工具留 TODO。`0` = 不限制。
+    #[serde(default = "default_mcp_tool_budget")]
+    pub mcp_tool_budget: usize,
+    /// MCP dispatcher(lazy)模式:启动时不 spawn 任何 MCP server 拿 tool list,
+    /// 只注册 `mcp__toolsearch`(发现)+ `mcp__call`(调用)两个元工具。
+    /// 模型先 search 发现 server/tool 名,再以 mcp__call 按名动态调用。
+    /// 默认 false(半惰性:启动时 spawn 一次拿 schema 后 drop,首 call 重 spawn)。
+    #[serde(default)]
+    pub mcp_lazy: bool,
+    /// 受信任的项目 cwd 列表。未在列表中的项目若有 session_start hooks,
+    /// 会 emit BackgroundEvent 提示"未信任项目"。
+    #[serde(default)]
+    pub trusted_projects: Vec<String>,
 }
 
 impl Default for Config {
@@ -113,6 +127,9 @@ impl Default for Config {
             permissions: PermissionsConfig::default(),
             hooks: HooksConfig::default(),
             mcp_servers: HashMap::new(),
+            mcp_tool_budget: default_mcp_tool_budget(),
+            mcp_lazy: false,
+            trusted_projects: Vec::new(),
         }
     }
 }
@@ -133,6 +150,17 @@ impl Default for SessionsConfig {
     }
 }
 
+/// MCP server 传输方式。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpTransport {
+    /// stdio:spawn 子进程,JSON-RPC over stdin/stdout。
+    #[default]
+    Stdio,
+    /// HTTP:每个 JSON-RPC request 一个 POST,响应 JSON(简化,不 SSE)。
+    Http { url: String },
+}
+
 /// MCP server 配置(`[mcp_servers.<name>]`)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -141,6 +169,8 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub startup_timeout_ms: u64,
+    #[serde(default)]
+    pub transport: McpTransport,
 }
 
 impl Default for McpServerConfig {
@@ -150,6 +180,7 @@ impl Default for McpServerConfig {
             args: Vec::new(),
             env: HashMap::new(),
             startup_timeout_ms: 10_000,
+            transport: McpTransport::Stdio,
         }
     }
 }
@@ -170,6 +201,9 @@ pub struct HooksConfig {
     pub post_tool_use: Vec<HookConfig>,
     pub session_start: Vec<HookConfig>,
     pub session_end: Vec<HookConfig>,
+    pub user_prompt_submit: Vec<HookConfig>,
+    pub notification: Vec<HookConfig>,
+    pub subagent_stop: Vec<HookConfig>,
     pub stop: Vec<HookConfig>,
 }
 
@@ -182,6 +216,11 @@ impl HooksConfig {
         self.session_start
             .extend(other.session_start.iter().cloned());
         self.session_end.extend(other.session_end.iter().cloned());
+        self.user_prompt_submit
+            .extend(other.user_prompt_submit.iter().cloned());
+        self.notification.extend(other.notification.iter().cloned());
+        self.subagent_stop
+            .extend(other.subagent_stop.iter().cloned());
         self.stop.extend(other.stop.iter().cloned());
     }
 
@@ -190,6 +229,9 @@ impl HooksConfig {
             && self.post_tool_use.is_empty()
             && self.session_start.is_empty()
             && self.session_end.is_empty()
+            && self.user_prompt_submit.is_empty()
+            && self.notification.is_empty()
+            && self.subagent_stop.is_empty()
             && self.stop.is_empty()
     }
 }
@@ -315,6 +357,17 @@ impl Config {
         }
     }
 
+    /// 生成配置指纹:模型 + 权限模式 + 规则数的简单表示,
+    /// 用于 SessionMeta.config_fingerprint,resume 时检测漂移。
+    pub fn config_fingerprint(&self, model: &str) -> String {
+        format!(
+            "{}|{:?}|{}",
+            model,
+            self.permission_mode,
+            self.permissions.rules.len()
+        )
+    }
+
     fn merge_partial_file(&mut self, p: &PartialFileConfig) {
         if let Some(v) = &p.model {
             self.model = Some(v.clone());
@@ -371,6 +424,15 @@ impl Config {
         }
         for (k, v) in &p.mcp_servers {
             self.mcp_servers.insert(k.clone(), v.clone());
+        }
+        if let Some(v) = p.mcp_tool_budget {
+            self.mcp_tool_budget = v;
+        }
+        if let Some(v) = p.mcp_lazy {
+            self.mcp_lazy = v;
+        }
+        if let Some(v) = &p.trusted_projects {
+            self.trusted_projects = v.clone();
         }
     }
 
@@ -437,6 +499,19 @@ impl Config {
                     .parse()
                     .map_err(|e| anyhow::anyhow!("auto_compact_at 无效: {e}"))?;
             }
+            "mcp_tool_budget" => {
+                self.mcp_tool_budget = ov
+                    .value
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("mcp_tool_budget 无效: {e}"))?;
+            }
+            "mcp_lazy" => {
+                self.mcp_lazy = match ov.value.as_str() {
+                    "true" | "1" => true,
+                    "false" | "0" => false,
+                    _ => anyhow::bail!("mcp_lazy 无效: {}(可选: true/false)", ov.value),
+                };
+            }
             _ => {
                 if let Some(rest) = ov.key.strip_prefix("model_providers.")
                     && let Some((id, field)) = rest.split_once('.')
@@ -491,6 +566,11 @@ struct PartialFileConfig {
     permissions: Option<PartialPermissionsConfig>,
     hooks: Option<HooksConfig>,
     mcp_servers: HashMap<String, McpServerConfig>,
+    mcp_tool_budget: Option<usize>,
+    #[serde(default)]
+    mcp_lazy: Option<bool>,
+    #[serde(default)]
+    trusted_projects: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -504,6 +584,10 @@ struct PartialPermissionsConfig {
 struct PartialSessionsConfig {
     keep_days: Option<u32>,
     max_session_mb: Option<u64>,
+}
+
+fn default_mcp_tool_budget() -> usize {
+    20
 }
 
 fn parse_permission_mode(s: &str) -> anyhow::Result<PermissionMode> {

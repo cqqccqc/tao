@@ -68,6 +68,19 @@ impl Tool for EditTool {
         }
 
         let path = resolve_path(&ctx.cwd, path_str);
+        // 校验"先 Read":防盲改。read_files 为 turn 级共享(由 run_turn 注入)。
+        let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let read_ok = ctx
+            .read_files
+            .lock()
+            .map(|s| s.contains(&canon))
+            .unwrap_or(false);
+        if !read_ok {
+            return Ok(ToolOutput::error(format!(
+                "编辑前须先 Read 该文件(防盲改): {}",
+                path.display()
+            )));
+        }
         let old = match fs::read_to_string(&path).await {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -136,10 +149,16 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("f.rs");
         fs::write(&p, "fn a() {}\nfn b() {}\n").await.unwrap();
+        let c = ctx(dir.path());
+        // 模拟先 Read(注入 read_files)
+        c.read_files
+            .lock()
+            .unwrap()
+            .insert(p.canonicalize().unwrap());
         let out = EditTool
             .call(
                 &json!({"path": "f.rs", "old_string": "fn a() {}", "new_string": "fn a() { return; }"}),
-                &ctx(dir.path()),
+                &c,
             )
             .await
             .unwrap();
@@ -174,10 +193,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("f.rs");
         fs::write(&p, "x\nx\n").await.unwrap();
+        let c = ctx(dir.path());
+        c.read_files
+            .lock()
+            .unwrap()
+            .insert(p.canonicalize().unwrap());
         let out = EditTool
             .call(
                 &json!({"path": "f.rs", "old_string": "x", "new_string": "y", "replace_all": true}),
-                &ctx(dir.path()),
+                &c,
             )
             .await
             .unwrap();

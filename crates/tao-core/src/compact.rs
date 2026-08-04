@@ -3,10 +3,13 @@
 //! v1:token 近似(字符数/4);window 硬编码 200k;自动触发;keep_last 4;
 //! covers_through_seq 用消息数近似(TODO 对齐日志 seq)。
 
+use std::sync::OnceLock;
+
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use tao_protocol::content::Content;
 use tao_protocol::log::LogEvent;
+use tiktoken_rs::{CoreBPE, cl100k_base};
 use tokio_util::sync::CancellationToken;
 
 use crate::model::{
@@ -15,16 +18,50 @@ use crate::model::{
 use crate::providers::ModelClient;
 use crate::recorder::Recorder;
 
+/// tiktoken cl100k_base tokenizer 单例(初始化失败返回 None,fallback chars/4)。
+static TOKENIZER: OnceLock<Option<CoreBPE>> = OnceLock::new();
+
+fn get_tokenizer() -> Option<&'static CoreBPE> {
+    TOKENIZER.get_or_init(|| cl100k_base().ok()).as_ref()
+}
+
 /// 默认上下文窗口(v1 硬编码;TODO:registry 暴露 context_window)。
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 /// 压缩时保留最近 N 条消息(2 轮)。
 pub const DEFAULT_KEEP_LAST: usize = 4;
 
-/// 近似 token 估算:内容字符数 / 4(英文近似;中文偏高,安全侧早压缩)。
+/// 近似 token 估算:优先用 tiktoken cl100k_base 编码求和;初始化失败 fallback
+/// chars/4(英文近似;中文偏高,安全侧早压缩)。
 pub fn approx_tokens(messages: &[ModelMessage]) -> u64 {
-    let chars: usize = messages.iter().map(message_chars).sum();
-    (chars as u64) / 4
+    if let Some(tokenizer) = get_tokenizer() {
+        let total: usize = messages.iter().map(|m| message_tokens(m, tokenizer)).sum();
+        total as u64
+    } else {
+        let chars: usize = messages.iter().map(message_chars).sum();
+        (chars as u64) / 4
+    }
 }
+
+/// tiktoken 路径:各 message 的 Text content encode 求和。
+fn message_tokens(m: &ModelMessage, tokenizer: &CoreBPE) -> usize {
+    match m {
+        ModelMessage::User { content } | ModelMessage::Assistant { content } => {
+            content.iter().map(|c| content_tokens(c, tokenizer)).sum()
+        }
+        ModelMessage::ToolResult { content, .. } => {
+            content.iter().map(|c| content_tokens(c, tokenizer)).sum()
+        }
+    }
+}
+
+fn content_tokens(c: &ModelContent, tokenizer: &CoreBPE) -> usize {
+    match c {
+        ModelContent::Text(t) => tokenizer.encode_ordinary(t).len(),
+        _ => 0,
+    }
+}
+
+// ---- fallback: chars / 4 ----
 
 fn message_chars(m: &ModelMessage) -> usize {
     match m {
@@ -59,7 +96,8 @@ pub async fn compact(
     }
     let to_summarize = &messages[..messages.len() - keep];
     let summary = summarize(client, model, to_summarize).await?;
-    let covers = to_summarize.len() as u64;
+    // 对齐日志 seq:被摘要的消息对应到当前已记录的最大 seq
+    let covers = recorder.current_seq();
     recorder.record(LogEvent::Compaction {
         summary: vec![Content::text(&summary)],
         covers_through_seq: covers,
@@ -195,7 +233,8 @@ mod tests {
     async fn compact_summarizes_and_keeps_last() {
         let dir = TempDir::new().unwrap();
         let (recorder, _id) =
-            JsonlRecorder::create_with_base(Path::new("/tmp/test"), dir.path()).unwrap();
+            JsonlRecorder::create_with_base(Path::new("/tmp/test"), dir.path(), String::new())
+                .unwrap();
         let model = MockModel {
             text: "摘要内容".into(),
         };
@@ -249,7 +288,8 @@ mod tests {
     async fn compact_noop_when_too_few() {
         let dir = TempDir::new().unwrap();
         let (recorder, _id) =
-            JsonlRecorder::create_with_base(Path::new("/tmp/test"), dir.path()).unwrap();
+            JsonlRecorder::create_with_base(Path::new("/tmp/test"), dir.path(), String::new())
+                .unwrap();
         let model = MockModel { text: "x".into() };
         let messages = vec![ModelMessage::User {
             content: vec![ModelContent::text("only")],

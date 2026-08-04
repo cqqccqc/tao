@@ -143,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let load_opts = build_load_opts(&cli)?;
     match cli.command.unwrap_or(Command::Tui) {
-        Command::Tui => tao_tui::run_with_load_opts(load_opts).await,
+        Command::Tui => tao_tui::run_with_load_opts(load_opts, cli.resume.clone(), cli.fork).await,
         Command::Exec {
             prompt,
             json,

@@ -83,6 +83,55 @@ impl ShadowRepo {
         )?;
         Ok(())
     }
+
+    /// 最近一次 shadow commit 的 hash(HEAD)。无 commit(尚未快照)返回 `None`。
+    pub fn latest_commit(&self) -> Result<Option<String>> {
+        let output = Command::new("git")
+            .arg("--git-dir")
+            .arg(&self.git_dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .context("git rev-parse HEAD 失败")?;
+        if output.status.success() {
+            Ok(Some(
+                String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 最近 n 个 shadow commit 的 `(short_hash, time)`。
+    /// 用 `git log --format=%h|%ci -n N`。无 commit(尚未快照)返回空 vec。
+    pub fn checkpoint_history(&self, n: usize) -> Result<Vec<(String, String)>> {
+        let output = Command::new("git")
+            .arg("--git-dir")
+            .arg(&self.git_dir)
+            .args(["log", "--format=%h|%ci"])
+            .arg(format!("-n{n}"))
+            .output()
+            .context("git log 失败")?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut rows = Vec::new();
+        for line in stdout.lines() {
+            if let Some((hash, time)) = line.split_once('|') {
+                rows.push((hash.to_string(), time.to_string()));
+            }
+        }
+        Ok(rows)
+    }
+
+    /// 最近一次 shadow commit 的 diff stat(`git show HEAD --stat`)。
+    /// 无 commit(尚未快照)返回空字符串。
+    pub fn diff_last(&self) -> Result<String> {
+        if self.latest_commit()?.is_none() {
+            return Ok(String::new());
+        }
+        run_git(&self.git_dir, &self.work_tree, &["show", "HEAD", "--stat"])
+    }
 }
 
 fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<String> {

@@ -102,7 +102,7 @@ impl AcpServer {
         match method {
             "initialize" => json!({
                 "protocolVersion": "0.1",
-                "agent": { "name": "tao", "version": "0.1.0" },
+                "agent": { "name": "tao", "version": env!("CARGO_PKG_VERSION") },
                 "capabilities": {},
             }),
             "session/new" => self.session_new(params).await,

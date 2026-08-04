@@ -1895,7 +1895,7 @@ dependencies = [
 
 [[package]]
 name = "tao-acp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "tao-apply-patch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "similar",
  "tempfile",
@@ -1921,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "tao-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1939,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "tao-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "tao-exec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1987,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "tao-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2004,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "tao-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "tao-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2028,7 +2028,7 @@ dependencies = [
 
 [[package]]
 name = "tao-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2772,7 +2772,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
 ]

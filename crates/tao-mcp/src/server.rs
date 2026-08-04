@@ -100,7 +100,7 @@ async fn handle(method: &str, params: &Value) -> Result<Value, String> {
     match method {
         "initialize" => Ok(json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "serverInfo": { "name": "tao", "version": "0.1.0" },
+            "serverInfo": { "name": "tao", "version": env!("CARGO_PKG_VERSION") },
             "capabilities": { "tools": {} },
         })),
         "notifications/initialized" => Ok(Value::Null),

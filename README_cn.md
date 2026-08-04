@@ -10,6 +10,7 @@ A Rust coding agent built around a universal harness core and one wire-stable pr
 
 [![CI](https://github.com/cqqccqc/tao/actions/workflows/ci.yml/badge.svg)](https://github.com/cqqccqc/tao/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/cqqccqc/tao/releases)
 [![Rust](https://img.shields.io/badge/rust-stable%20·%20edition%202024-orange.svg)](https://www.rust-lang.org/)
 [![Stage](https://img.shields.io/badge/stage-alpha%20·%20dogfood-yellow.svg)](#路线图)
 [![Platform](https://img.shields.io/badge/platform-macOS%20·%20Linux-lightgrey.svg)](#安装)
@@ -20,7 +21,7 @@ tao 是一个用 Rust 构建的 coding agent。它的核心不是某个终端 UI
 
 设计上对标 [Claude Code](https://github.com/anthropics/claude-code)、[OpenAI codex CLI](https://github.com/openai/codex)、[gemini-cli](https://github.com/google-gemini/gemini-cli) 与 [opencode](https://github.com/sst/opencode)：把经典 coding agent 体验做到位，同时在**多前端复用、会话资产化、模型无关性、可编程扩展**四条线上做得更彻底。
 
-> **状态：alpha / dogfood 阶段。** M0–M4 主体完成，作者日常开发已自用 tao 完成。M5（硬化）与 M6（web 前端）进行中。详见 [路线图](#路线图)。
+> **状态：alpha / dogfood 阶段。** M0–M4 主体完成，作者日常开发已自用 tao 完成。M5（硬化）进行中，M6（web 前端）规划中。详见 [路线图](#路线图)。
 
 ---
 
@@ -125,8 +126,8 @@ tao -c model_providers.local.base_url=http://localhost:11434/v1 \
 | `tao proto` | 协议模式：stdin/stdout 走 JSONL `Op`/`Event`，供任意语言前端/脚本组合 | ✅ |
 | `tao acp` | ACP 模式：被 Zed 等编辑器以 stdio 拉起内嵌 | ✅ |
 | `tao sessions ls\|show\|share\|audit\|gc` | 会话管理：fork 树 / 预览 / 净化导出 / 权限审计 / 清理 | ✅ |
-| `tao serve --port N` | 常驻服务：TCP/WS 多客户端 attach 同一会话 | 🚧 规划中 |
-| `tao mcp-serve` | 把 tao 自身暴露为 MCP server（list/send/read session） | 🚧 规划中 |
+| `tao serve --port N` | 常驻服务：TCP 多客户端 attach 同一会话 | ✅ |
+| `tao mcp-serve` | 把 tao 自身暴露为 MCP server（list/send/read session） | ✅ |
 | `tao login\|logout\|auth` | OAuth / API key 交互登录 | 🚧 规划中（当前用环境变量） |
 
 常用全局参数：`-c key=value`（覆盖配置，支持点路径）、`--profile <name>`、`--model provider/id`、`--resume <id>`、`--fork`、`--dangerously-bypass-permissions`。
@@ -270,7 +271,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI（`RUSTFLAGS="-D warnings"`）在 macOS + Linux 上跑 fmt / clippy / test 全绿是合入门槛。xtask 提供快照更新与 fixture 生成等开发脚本。
+CI（`RUSTFLAGS="-D warnings"`）在 macOS + Linux 上跑 fmt / clippy / test 全绿是合入门槛。xtask 目前只提供 `ci` 一个任务（fmt check + clippy + test）。
 
 设计决策与取舍都记录在 [docs/design/](docs/design/README.md)，动手前建议先读架构与协议两篇。
 

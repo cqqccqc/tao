@@ -1,0 +1,111 @@
+name: release
+
+# 打 tag v* 时触发:多平台交叉构建 release 二进制并发布 GitHub Release。
+# 产物:tao-<tag>-<target>.tar.gz + .sha256,覆盖 macOS/Linux × x86_64/aarch64。
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+# 创建 release 与上传 asset 需要 contents:write
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # Linux arm64 在 x86_64 runner 上交叉编译,需要 aarch64 linker
+      - name: Install aarch64-linux cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} -p tao-cli
+
+      - name: Verify binary
+        run: |
+          BIN="target/${{ matrix.target }}/release/tao"
+          test -f "$BIN"
+          file "$BIN" || true
+
+      - name: Package
+        run: |
+          mkdir staging
+          cp target/${{ matrix.target }}/release/tao staging/
+          ARCHIVE="tao-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          tar -czf "$ARCHIVE" -C staging tao
+          shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          echo "Packaged $ARCHIVE"
+          ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tao-${{ matrix.target }}
+          path: |
+            tao-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            tao-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            tao v${{ github.ref_name }} — first packaged release.
+
+            UI-agnostic coding-agent harness written in Rust. M0–M4 complete: sessions, model-agnostic providers, tools, permissions, event-sourced persistence, checkpoint/compact, and TUI / exec / proto / serve / acp / mcp-serve frontends, plus AGENTS.md instructions and skills.
+
+            **Install**: download the archive for your platform, extract `tao` onto your `PATH`, then point it at a provider key and run `tao`.
+
+            ```bash
+            export ANTHROPIC_API_KEY="sk-..."   # or OPENAI_API_KEY / DEEPSEEK_API_KEY / ...
+            tao                                  # launch the TUI
+            ```
+
+            Supported platforms: macOS · Linux (x86_64 / aarch64). Windows (PTY / process groups / sandbox) is a M5 non-goal.
+          files: |
+            dist/**/*.tar.gz
+            dist/**/*.sha256
